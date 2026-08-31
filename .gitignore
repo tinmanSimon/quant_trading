@@ -1,0 +1,7 @@
+# Data files (too large for git)
+data/
+*.csv
+*.parquet
+*.db
+*.sqlite
+
