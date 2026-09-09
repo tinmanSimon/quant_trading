@@ -1,18 +1,8 @@
-from dataclasses import dataclass
-from datetime import datetime
 from abc import ABC, abstractmethod
 import polars as pl
 
-# Standard columns expected by your backtester and feature pipeline
-OHLCV_SCHEMA = {
-    "timestamp": pl.Datetime(time_unit="ms", time_zone="UTC"),
-    "symbol": pl.Utf8,
-    "open": pl.Float64,
-    "high": pl.Float64,
-    "low": pl.Float64,
-    "close": pl.Float64,
-    "volume": pl.Float64,
-}
+from .schemas.ohlcv import OHLCV_SCHEMA
+
 
 class BaseDataProvider(ABC):
     @abstractmethod
@@ -24,8 +14,10 @@ class BaseDataProvider(ABC):
         timeframe: str = "1h"
     ) -> pl.DataFrame:
         """
-        Fetches OHLCV data and returns a Polars DataFrame 
-        conforming exactly to CANONICAL_SCHEMA.
+        Fetch OHLCV data as a Polars DataFrame conforming to ``OHLCV_SCHEMA``.
+
+        The public provider interface will accept ``DataRequest`` in a later
+        step; this legacy signature remains unchanged while the contract is
+        introduced and tested.
         """
         pass
-

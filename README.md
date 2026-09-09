@@ -10,7 +10,11 @@ test-only tooling separately:
 
 ```bash
 ./venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+./venv/bin/pip install -e .
 ```
+
+The editable install makes `data_pipeline` importable from the virtual
+environment while continuing to use the source files in this repository.
 
 Run the normal, offline test suite with:
 
@@ -26,3 +30,12 @@ Tests use per-test temporary directories and deterministic fixtures under
 ```bash
 ./venv/bin/python -m pytest -m network
 ```
+
+## Current data contract
+
+The first supported dataset is canonical OHLCV. A `DataRequest` has
+timezone-aware UTC bounds, with an inclusive `start` and exclusive `end`.
+OHLCV timestamps identify the start of a bar and must be UTC. Validated frames
+use ordered `timestamp`, `symbol`, `open`, `high`, `low`, `close`, and
+`volume` columns. Each frame represents one timeframe, and its rows are
+ordered by symbol and timestamp.
