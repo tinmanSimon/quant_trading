@@ -1,0 +1,29 @@
+[
+  {
+    "timestamp": "2024-01-02T14:30:00Z",
+    "symbol": "AAPL",
+    "open": 185.64,
+    "high": 186.12,
+    "low": 185.2,
+    "close": 185.95,
+    "volume": 1250000.0
+  },
+  {
+    "timestamp": "2024-01-02T15:30:00Z",
+    "symbol": "AAPL",
+    "open": 185.95,
+    "high": 186.44,
+    "low": 185.8,
+    "close": 186.25,
+    "volume": 980000.0
+  },
+  {
+    "timestamp": "2024-01-02T16:30:00Z",
+    "symbol": "AAPL",
+    "open": 186.25,
+    "high": 186.3,
+    "low": 185.61,
+    "close": 185.78,
+    "volume": 1100000.0
+  }
+]
