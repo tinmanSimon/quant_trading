@@ -89,6 +89,13 @@ Price policy is explicitly `unadjusted`: yfinance auto-adjust, back-adjust and
 repair are disabled. This preserves Yahoo's supplied OHLC, but does not undo
 historical split treatment already present in Yahoo data. `Adj Close` is not
 stored. Raw means canonicalized vendor OHLCV, not the original HTTP response.
+Source volume is checked on Yahoo's chart response before yfinance processes
+it: missing volume is rejected with UTC timestamps instead of being silently
+filled with zero. Genuine zero volume remains valid. With
+`YFinanceProvider(skip_missing_ohlc=True)`, wholly missing OHLC bars can still
+be skipped with a warning, but missing volume alone is never skipped or filled.
+This guard uses per-request history hooks in the pinned yfinance version;
+raw-response regression tests must pass when upgrading that dependency.
 Yahoo symbols are canonicalized to uppercase, so `aapl` and `AAPL` share one
 storage identity and cannot bypass overlap protection. Other providers retain
 case-sensitive instrument identifiers. Local symbol queries apply Yahoo's

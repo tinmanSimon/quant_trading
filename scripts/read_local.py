@@ -12,9 +12,9 @@ def main():
         layer="raw",
         provider="yahoo",
         symbol="AAPL",
-        timeframe="1d",
-        start=datetime(2026, 1, 1, tzinfo=UTC),
-        end=datetime(2026, 2, 1, tzinfo=UTC),
+        timeframe="1h",
+        start=datetime(2000, 1, 1, tzinfo=UTC),
+        end=datetime(2026, 9, 18, tzinfo=UTC),
     )
 
     frame = pipeline.read(query)

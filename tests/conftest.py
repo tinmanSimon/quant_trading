@@ -32,6 +32,9 @@ def prevent_accidental_yahoo_requests(request, monkeypatch):
             raise AssertionError("Unexpected live Yahoo request in an offline test")
 
         monkeypatch.setattr(yf, "download", blocked)
+        from yfinance.data import YfData
+        monkeypatch.setattr(YfData, "get", blocked)
+        monkeypatch.setattr(YfData, "cache_get", blocked)
 
 
 @pytest.fixture

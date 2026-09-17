@@ -1,4 +1,4 @@
-"""Yahoo OHLCV adapter using the installed yfinance download API.
+"""Yahoo OHLCV adapter with source-volume validation before yfinance cleanup.
 
 Daily and longer bars carry *session-date labels*: exchange-local YYYY-MM-DD
 is represented at 00:00:00 UTC, regardless of the exchange's UTC offset. This
@@ -10,14 +10,16 @@ index to UTC. Naive intraday timestamps are ambiguous and are rejected.
 auto-adjust, back-adjust and repair disabled. It does not undo any historical
 split treatment already present in Yahoo's source data. Adj Close is unused.
 
-API documentation: https://ranaroussi.github.io/yfinance/reference/api/yfinance.download.html
+API documentation: https://ranaroussi.github.io/yfinance/reference/api/yfinance.Ticker.history.html
 """
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, time, timedelta
 import math
 from numbers import Real
+import warnings
 
 import pandas as pd
 from pandas.api.types import (
@@ -29,6 +31,7 @@ from pandas.api.types import (
 )
 import polars as pl
 import yfinance as yf
+from yfinance.exceptions import YFPricesMissingError
 
 from ..exceptions import (
     EmptyDataError,
@@ -57,7 +60,9 @@ class YFinanceProvider(BaseDataProvider):
     shorter window. ``timeout`` bounds each download response wait (seconds),
     not the total fetch duration; yfinance also performs metadata/cookie calls
     using its own finite timeouts. Downloads run without worker threads and
-    this adapter adds no retries.
+    this adapter adds no retries. Opt-in ``skip_missing_ohlc`` drops bars whose
+    four OHLC prices are all missing, warning with every omitted timestamp.
+    Other invalid values still fail validation.
     """
 
     name = "yahoo"
@@ -67,7 +72,7 @@ class YFinanceProvider(BaseDataProvider):
     supported_datasets = frozenset({"ohlcv"})
     supported_price_adjustments = frozenset({"unadjusted"})
 
-    def __init__(self, *, timeout: float = 10.0) -> None:
+    def __init__(self, *, timeout: float = 10.0, skip_missing_ohlc: bool = False) -> None:
         if (
             isinstance(timeout, bool)
             or not isinstance(timeout, Real)
@@ -76,31 +81,27 @@ class YFinanceProvider(BaseDataProvider):
         ):
             raise ValueError("timeout must be a finite number in (0, 60] seconds.")
         self.timeout = float(timeout)
+        if not isinstance(skip_missing_ohlc, bool):
+            raise ValueError("skip_missing_ohlc must be a boolean.")
+        self.skip_missing_ohlc = skip_missing_ohlc
 
     def fetch(self, request: DataRequest) -> pl.DataFrame:
         self._validate_request(request)
         date_labels = request.timeframe in _DATE_INTERVALS
         start, end = _download_bounds(request, date_labels=date_labels)
         try:
-            downloaded = yf.download(
-                tickers=request.symbol,
+            downloaded = _download_history(
+                symbol=request.symbol,
                 start=start,
                 end=end,
                 interval=request.timeframe,
-                auto_adjust=False,
-                back_adjust=False,
-                repair=False,
-                actions=False,
-                keepna=True,
-                rounding=False,
-                prepost=False,
-                ignore_tz=date_labels,
-                group_by="column",
-                multi_level_index=True,
-                threads=False,
-                progress=False,
                 timeout=self.timeout,
+                skip_missing_ohlc=self.skip_missing_ohlc,
             )
+        except (InvalidOHLCVError, SchemaValidationError, EmptyDataError):
+            raise
+        except YFPricesMissingError as exc:
+            raise EmptyDataError(f"Yahoo returned no data for {request.symbol!r}: {exc}") from exc
         except Exception as exc:
             raise ProviderError(
                 f"Yahoo download failed for {request.symbol!r} "
@@ -110,7 +111,6 @@ class YFinanceProvider(BaseDataProvider):
         if downloaded is None or (
             isinstance(downloaded, pd.DataFrame) and downloaded.empty
         ):
-            # download() commonly suppresses vendor errors and returns empty.
             raise EmptyDataError(
                 f"Yahoo returned no data for {request.symbol!r} "
                 f"in [{request.start.isoformat()}, {request.end.isoformat()}); "
@@ -120,8 +120,25 @@ class YFinanceProvider(BaseDataProvider):
             raise ProviderError("Yahoo download did not return a pandas DataFrame.")
 
         canonical = _normalize(downloaded, request.symbol, date_labels=date_labels)
-        # Validate before slicing so missing keys/values cannot be hidden by
-        # filtering. Reject an empty requested interval after slicing.
+        if self.skip_missing_ohlc:
+            missing_ohlc = pl.all_horizontal(
+                [pl.col(column).is_null() | pl.col(column).is_nan()
+                 for column in ("open", "high", "low", "close")]
+            )
+            omitted = canonical.filter(missing_ohlc)
+            if not omitted.is_empty():
+                timestamps = ", ".join(
+                    timestamp.isoformat() for timestamp in omitted["timestamp"].to_list()
+                )
+                warnings.warn(
+                    f"Yahoo {request.symbol}: skipped {omitted.height} bars with all OHLC "
+                    f"prices missing (UTC): {timestamps}. Returned data has gaps.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                canonical = canonical.filter(~missing_ohlc)
+        # Validate remaining bars before slicing; other invalid values must
+        # not be hidden by range filtering. Empty results still raise an error.
         canonical = validate_ohlcv(canonical.sort(["symbol", "timestamp"]))
         canonical = canonical.filter(
             (pl.col("timestamp") >= request.start)
@@ -158,6 +175,128 @@ class YFinanceProvider(BaseDataProvider):
             )
         if "," in request.symbol or any(c.isspace() for c in request.symbol):
             raise UnsupportedRequestError("Yahoo requests must contain a single ticker.")
+
+
+def _download_history(*, symbol, start, end, interval, timeout, skip_missing_ohlc):
+    # yfinance 1.7.0 fills null volume with zero even with repair=False and
+    # keepna=True. Check the same HTTP response before history() can do so.
+    # PriceHistory is private to this Ticker; never patch yfinance globals or
+    # mutate its shared YfData transport. These private hooks are covered by
+    # raw-response tests and must be rechecked when upgrading pinned yfinance.
+    history = yf.Ticker(symbol)._lazy_load_price_history()
+    history._data = _VolumeCheckedData(history._data, symbol, skip_missing_ohlc)
+    # Retain per-call exception handling instead of changing yfinance's global
+    # hide_exceptions setting. The pinned release still supports this argument.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", message="'raise_errors' deprecated", category=DeprecationWarning,
+        )
+        return history.history(
+            start=start, end=end, interval=interval, timeout=timeout,
+            auto_adjust=False, back_adjust=False, repair=False, actions=False,
+            keepna=True, rounding=False, prepost=False, raise_errors=True,
+        )
+
+
+class _VolumeCheckedData:
+    """Per-fetch transport wrapper; inspect source JSON without changing it."""
+
+    def __init__(self, transport, symbol: str, skip_missing_ohlc: bool):
+        self._transport = transport
+        self._symbol = symbol
+        self._skip_missing_ohlc = skip_missing_ohlc
+
+    def __getattr__(self, name):
+        return getattr(self._transport, name)
+
+    def get(self, *args, **kwargs):
+        return self._check(self._transport.get(*args, **kwargs), kwargs.get("params", {}))
+
+    def cache_get(self, *args, **kwargs):
+        return self._check(self._transport.cache_get(*args, **kwargs), kwargs.get("params", {}))
+
+    def _check(self, response, params):
+        payload = response.json()
+        chart = payload.get("chart") or {}
+        if chart.get("error") or not chart.get("result"):
+            return response  # Let yfinance report the vendor's error.
+        result = chart["result"][0]
+        timestamps = result.get("timestamp") or []
+        if not timestamps:
+            return response
+        try:
+            quotes = result["indicators"]["quote"][0]
+            volumes = quotes["volume"]
+            if len(volumes) != len(timestamps):
+                raise ValueError("Volume count differs from timestamp count")
+            missing = []
+            omitted = []
+            for index, (timestamp, volume) in enumerate(zip(timestamps, volumes, strict=True)):
+                # Yahoo can append a latest quote outside the download window;
+                # that quote must not prevent ingestion of historical bars.
+                if ("period1" in params and timestamp < params["period1"]) or (
+                    "period2" in params and timestamp >= params["period2"]
+                ):
+                    continue
+                if not _missing_number(volume):
+                    continue
+                # Remove wholly missing bars before yfinance can merge them
+                # into another bar. Missing volume alone never triggers a skip.
+                if self._skip_missing_ohlc and all(
+                    _missing_number(quotes[column][index])
+                    for column in ("open", "high", "low", "close")
+                ):
+                    omitted.append(index)
+                    continue
+                missing.append(pd.Timestamp(timestamp, unit="s", tz="UTC").isoformat())
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise SchemaValidationError(f"Malformed Yahoo source volume data: {exc}") from exc
+        if missing:
+            raise InvalidOHLCVError(
+                f"Yahoo {self._symbol}: missing source volume at UTC timestamps: "
+                + ", ".join(missing)
+                + ". Refusing yfinance's conversion of missing volume to zero."
+            )
+        if omitted:
+            labels = ", ".join(
+                pd.Timestamp(timestamps[index], unit="s", tz="UTC").isoformat()
+                for index in omitted
+            )
+            warnings.warn(
+                f"Yahoo {self._symbol}: skipped {len(omitted)} bars with all OHLC "
+                f"prices missing (UTC): {labels}. Returned data has gaps.",
+                UserWarning, stacklevel=3,
+            )
+            if len(omitted) == len(timestamps):
+                raise EmptyDataError(f"Yahoo returned no usable bars for {self._symbol!r}.")
+            payload = deepcopy(payload)
+            result = payload["chart"]["result"][0]
+            excluded = set(omitted)
+            result["timestamp"] = [value for index, value in enumerate(timestamps) if index not in excluded]
+            for groups in result["indicators"].values():
+                for group in groups:
+                    for field, values in group.items():
+                        if not isinstance(values, list) or len(values) != len(timestamps):
+                            raise SchemaValidationError(f"Malformed Yahoo indicator array: {field}")
+                        group[field] = [value for index, value in enumerate(values) if index not in excluded]
+            return _SourceResponse(response, payload)
+        return response
+
+
+class _SourceResponse:
+    def __init__(self, response, payload):
+        self._response = response
+        self._payload = payload
+
+    def __getattr__(self, name):
+        return getattr(self._response, name)
+
+    def json(self):
+        return self._payload
+
+
+def _missing_number(value) -> bool:
+    return value is None or (isinstance(value, Real) and math.isnan(value))
 
 
 def _download_bounds(

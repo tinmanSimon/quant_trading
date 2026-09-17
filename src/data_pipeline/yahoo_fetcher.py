@@ -4,5 +4,5 @@ from .base_fetcher import BaseDataProvider, OHLCV_SCHEMA
 from .providers.yahoo import YFinanceProvider, yf
 
 
-# Keep the historical yf.download monkeypatch path working as well.
+# Legacy class imports remain supported; fetching now checks raw source volume.
 __all__ = ["BaseDataProvider", "OHLCV_SCHEMA", "YFinanceProvider"]

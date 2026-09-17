@@ -34,7 +34,7 @@ from data_pipeline.providers import (
 )
 from data_pipeline.yahoo_fetcher import YFinanceProvider as LegacyYahoo
 import data_pipeline.providers as providers
-import data_pipeline.yahoo_fetcher as legacy_yahoo
+import data_pipeline.providers.yahoo as yahoo_provider
 
 
 @pytest.fixture
@@ -70,8 +70,7 @@ def _vendor_frame(index: pd.Index | None = None) -> pd.DataFrame:
 @pytest.fixture(autouse=True)
 def download(monkeypatch: pytest.MonkeyPatch) -> Mock:
     mocked = Mock(return_value=_vendor_frame())
-    # Patching this historical path must affect the new implementation, too.
-    monkeypatch.setattr(legacy_yahoo.yf, "download", mocked)
+    monkeypatch.setattr(yahoo_provider, "_download_history", mocked)
     return mocked
 
 
@@ -234,15 +233,9 @@ def test_yahoo_normalizes_sorts_and_slices_half_open_interval(
     assert kwargs["start"] == request_data.start
     assert kwargs["end"] == request_data.end
     assert kwargs["interval"] == "1h"
-    assert kwargs["tickers"] == "AAPL"
+    assert kwargs["symbol"] == "AAPL"
     assert kwargs["timeout"] == 3.5
-    assert kwargs["keepna"] is True
-    assert kwargs["multi_level_index"] is True
-    for option in (
-        "auto_adjust", "back_adjust", "repair", "actions", "rounding", "prepost",
-        "ignore_tz", "threads", "progress",
-    ):
-        assert kwargs[option] is False
+    assert kwargs["skip_missing_ohlc"] is False
 
 
 def test_slice_excludes_bars_before_start(download: Mock, request_data: DataRequest) -> None:
@@ -318,7 +311,6 @@ def test_daily_and_longer_bars_use_utc_midnight_session_date_labels(
     ]
     assert download.call_args.kwargs["start"] == "2024-01-02"
     assert download.call_args.kwargs["end"] == "2024-01-04"
-    assert download.call_args.kwargs["ignore_tz"] is True
 
 
 def test_daily_partial_day_bounds_enclose_dates_then_slice_labels(
@@ -396,6 +388,47 @@ def test_yahoo_rejects_null_and_nonfinite_values(
     download.return_value = frame
     with pytest.raises(InvalidOHLCVError, match="finite|non-null"):
         YFinanceProvider().fetch(request_data)
+
+
+def test_yahoo_skip_missing_ohlc_warns_and_preserves_valid_bars(
+    request_data: DataRequest, download: Mock,
+) -> None:
+    expected = YFinanceProvider().fetch(request_data).tail(1)
+    vendor = _vendor_frame()
+    vendor.loc[vendor.index[0], ["Open", "High", "Low", "Close"]] = float("nan")
+    download.return_value = vendor
+
+    # The default remains strict.
+    with pytest.raises(InvalidOHLCVError):
+        YFinanceProvider().fetch(request_data)
+    with pytest.warns(UserWarning, match="Yahoo AAPL: skipped 1 bars") as caught:
+        result = YFinanceProvider(skip_missing_ohlc=True).fetch(request_data)
+
+    assert "2024-01-02T14:30:00+00:00" in str(caught[0].message)
+    assert_frame_equal(result, expected)
+
+
+@pytest.mark.parametrize("column,value", [("Close", None), ("Close", float("inf")), ("Volume", None)])
+def test_yahoo_skip_missing_ohlc_still_rejects_other_invalid_values(
+    request_data: DataRequest, download: Mock, column: str, value: float | None,
+) -> None:
+    vendor = _vendor_frame()
+    vendor[column] = vendor[column].astype(float)
+    vendor.loc[vendor.index[0], column] = value
+    download.return_value = vendor
+    with pytest.raises(InvalidOHLCVError):
+        YFinanceProvider(skip_missing_ohlc=True).fetch(request_data)
+
+
+def test_yahoo_skip_missing_ohlc_rejects_empty_result(
+    request_data: DataRequest, download: Mock,
+) -> None:
+    vendor = _vendor_frame()
+    vendor[["Open", "High", "Low", "Close"]] = float("nan")
+    download.return_value = vendor
+    with pytest.warns(UserWarning, match="skipped 3 bars"):
+        with pytest.raises(EmptyDataError):
+            YFinanceProvider(skip_missing_ohlc=True).fetch(request_data)
 
 
 def test_yahoo_does_not_hide_null_timestamps_when_slicing(

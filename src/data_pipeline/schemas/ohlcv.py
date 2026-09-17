@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import polars as pl
 
 from ..exceptions import (
@@ -150,7 +152,25 @@ def _validate_numeric_values(frame: pl.DataFrame) -> None:
         ]
     )
     if frame.select(invalid_numeric_value.any()).item():
-        raise InvalidOHLCVError("OHLCV numeric values must be finite and non-null.")
+        invalid_rows = frame.filter(invalid_numeric_value)
+        details = []
+        for row in invalid_rows.head(10).iter_rows(named=True):
+            values = ", ".join(
+                f"{column}={row[column]!r}"
+                for column in _NUMERIC_COLUMNS
+                if row[column] is None or not math.isfinite(row[column])
+            )
+            details.append(
+                f"{row['symbol']} at {row['timestamp'].isoformat()}: {values}"
+            )
+        remaining = invalid_rows.height - len(details)
+        if remaining:
+            details.append(f"... {remaining} more invalid rows")
+        raise InvalidOHLCVError(
+            "OHLCV numeric values must be finite and non-null. "
+            f"Found {invalid_rows.height} invalid rows (timestamps in UTC): "
+            + "; ".join(details)
+        )
 
     if frame.select((pl.col("volume") < 0).any()).item():
         raise InvalidOHLCVError("volume must be greater than or equal to zero.")

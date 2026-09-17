@@ -124,6 +124,43 @@ def test_validator_rejects_non_finite_numeric_value(
         validate_ohlcv(sample_ohlcv_frame.with_columns(pl.lit(math.nan).alias("close")))
 
 
+@pytest.mark.parametrize("value", [None, math.nan, math.inf, -math.inf])
+def test_numeric_error_identifies_timestamp_symbol_and_columns(
+    sample_ohlcv_frame: pl.DataFrame, value: float | None,
+) -> None:
+    invalid = sample_ohlcv_frame.with_columns(
+        pl.Series("close", [sample_ohlcv_frame["close"][0], value,
+                            sample_ohlcv_frame["close"][2]], dtype=pl.Float64),
+        pl.Series("volume", [sample_ohlcv_frame["volume"][0], None,
+                             sample_ohlcv_frame["volume"][2]], dtype=pl.Float64),
+    )
+
+    with pytest.raises(InvalidOHLCVError) as error:
+        validate_ohlcv(invalid)
+
+    message = str(error.value)
+    assert "Found 1 invalid rows (timestamps in UTC)" in message
+    assert f"AAPL at {sample_ohlcv_frame['timestamp'][1].isoformat()}" in message
+    assert f"close={value!r}, volume=None" in message
+    assert sample_ohlcv_frame["timestamp"][0].isoformat() not in message
+
+
+def test_numeric_error_limits_details_and_reports_remaining_rows(
+    sample_ohlcv_frame: pl.DataFrame,
+) -> None:
+    invalid = pl.concat([sample_ohlcv_frame] * 4).with_columns(
+        pl.lit(None, dtype=pl.Float64).alias("close")
+    )
+
+    with pytest.raises(InvalidOHLCVError) as error:
+        validate_ohlcv(invalid)
+
+    message = str(error.value)
+    assert "Found 12 invalid rows" in message
+    assert message.count("close=None") == 10
+    assert "2 more invalid rows" in message
+
+
 def test_validator_rejects_missing_timestamp_value(
     sample_ohlcv_frame: pl.DataFrame,
 ) -> None:

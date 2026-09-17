@@ -2,18 +2,20 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from data_pipeline import DataPipeline, DataRequest
+from data_pipeline.providers import ProviderRegistry, YFinanceProvider
 
 
 def main():
     project_root = Path(__file__).resolve().parents[1]
-    pipeline = DataPipeline(project_root / "data")
+    providers = ProviderRegistry({"yahoo": YFinanceProvider(skip_missing_ohlc=True)})
+    pipeline = DataPipeline(project_root / "data", providers=providers)
 
     request = DataRequest(
         symbol="AAPL",
         provider="yahoo",
-        timeframe="1d",
-        start=datetime(2026, 1, 1, tzinfo=UTC),
-        end=datetime(2026, 2, 1, tzinfo=UTC),
+        timeframe="1h",
+        start=datetime(2024, 11, 1, tzinfo=UTC),
+        end=datetime(2025, 1, 1, tzinfo=UTC),
     )
 
     result = pipeline.ingest(request)
