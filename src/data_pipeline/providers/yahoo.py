@@ -17,8 +17,9 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, time, timedelta
+from decimal import Decimal, InvalidOperation
 import math
-from numbers import Real
+from numbers import Integral, Real
 import warnings
 
 import pandas as pd
@@ -35,6 +36,7 @@ from yfinance.exceptions import YFPricesMissingError
 
 from ..exceptions import (
     EmptyDataError,
+    DuplicateBarError,
     InvalidDataRequestError,
     InvalidOHLCVError,
     ProviderError,
@@ -43,6 +45,7 @@ from ..exceptions import (
 )
 from ..models import DataRequest
 from ..schemas.ohlcv import validate_ohlcv
+from ..quality import FetchQuality, FetchResult, OmittedBar
 from .base import BaseDataProvider
 
 
@@ -86,7 +89,12 @@ class YFinanceProvider(BaseDataProvider):
         self.skip_missing_ohlc = skip_missing_ohlc
 
     def fetch(self, request: DataRequest) -> pl.DataFrame:
+        return self.fetch_result(request).frame
+
+    def fetch_result(self, request: DataRequest) -> FetchResult:
+        """Return prices and per-call provenance; never share mutable fetch state."""
         self._validate_request(request)
+        omissions: list[OmittedBar] = []
         date_labels = request.timeframe in _DATE_INTERVALS
         start, end = _download_bounds(request, date_labels=date_labels)
         try:
@@ -97,8 +105,10 @@ class YFinanceProvider(BaseDataProvider):
                 interval=request.timeframe,
                 timeout=self.timeout,
                 skip_missing_ohlc=self.skip_missing_ohlc,
+                omissions=omissions,
+                date_labels=date_labels,
             )
-        except (InvalidOHLCVError, SchemaValidationError, EmptyDataError):
+        except (InvalidOHLCVError, SchemaValidationError, EmptyDataError, DuplicateBarError):
             raise
         except YFPricesMissingError as exc:
             raise EmptyDataError(f"Yahoo returned no data for {request.symbol!r}: {exc}") from exc
@@ -127,6 +137,8 @@ class YFinanceProvider(BaseDataProvider):
             )
             omitted = canonical.filter(missing_ohlc)
             if not omitted.is_empty():
+                omissions.extend(OmittedBar(timestamp, "all_ohlc_missing")
+                                 for timestamp in omitted["timestamp"].to_list())
                 timestamps = ", ".join(
                     timestamp.isoformat() for timestamp in omitted["timestamp"].to_list()
                 )
@@ -141,15 +153,22 @@ class YFinanceProvider(BaseDataProvider):
         # not be hidden by range filtering. Empty results still raise an error.
         canonical = validate_ohlcv(canonical.sort(["symbol", "timestamp"]))
         canonical = canonical.filter(
-            (pl.col("timestamp") >= request.start)
-            & (pl.col("timestamp") < request.end)
+            (pl.col("timestamp").cast(pl.Datetime("us", "UTC"))
+             >= pl.lit(request.start, dtype=pl.Datetime("us", "UTC")))
+            & (pl.col("timestamp").cast(pl.Datetime("us", "UTC"))
+               < pl.lit(request.end, dtype=pl.Datetime("us", "UTC")))
         )
         if canonical.is_empty():
             raise EmptyDataError(
                 f"Yahoo returned no bars in the requested [start, end) interval "
                 f"for {request.symbol!r}."
             )
-        return canonical
+        return FetchResult(canonical, FetchQuality(
+            status="reported", skip_missing_ohlc=self.skip_missing_ohlc,
+            omitted_bars=tuple(item for item in omissions
+                               if request.start <= item.timestamp < request.end),
+            provider_version=f"yfinance/{yf.__version__}",
+        ))
 
     def _validate_request(self, request: DataRequest) -> None:
         if not isinstance(request, DataRequest):
@@ -177,14 +196,16 @@ class YFinanceProvider(BaseDataProvider):
             raise UnsupportedRequestError("Yahoo requests must contain a single ticker.")
 
 
-def _download_history(*, symbol, start, end, interval, timeout, skip_missing_ohlc):
+def _download_history(*, symbol, start, end, interval, timeout, skip_missing_ohlc,
+                      omissions=None, date_labels=False):
     # yfinance 1.7.0 fills null volume with zero even with repair=False and
     # keepna=True. Check the same HTTP response before history() can do so.
     # PriceHistory is private to this Ticker; never patch yfinance globals or
     # mutate its shared YfData transport. These private hooks are covered by
     # raw-response tests and must be rechecked when upgrading pinned yfinance.
     history = yf.Ticker(symbol)._lazy_load_price_history()
-    history._data = _VolumeCheckedData(history._data, symbol, skip_missing_ohlc)
+    history._data = _VolumeCheckedData(history._data, symbol, skip_missing_ohlc,
+                                      omissions=omissions, date_labels=date_labels)
     # Retain per-call exception handling instead of changing yfinance's global
     # hide_exceptions setting. The pinned release still supports this argument.
     with warnings.catch_warnings():
@@ -201,10 +222,13 @@ def _download_history(*, symbol, start, end, interval, timeout, skip_missing_ohl
 class _VolumeCheckedData:
     """Per-fetch transport wrapper; inspect source JSON without changing it."""
 
-    def __init__(self, transport, symbol: str, skip_missing_ohlc: bool):
+    def __init__(self, transport, symbol: str, skip_missing_ohlc: bool, *,
+                 omissions=None, date_labels=False):
         self._transport = transport
         self._symbol = symbol
         self._skip_missing_ohlc = skip_missing_ohlc
+        self._omissions = [] if omissions is None else omissions
+        self._date_labels = date_labels
 
     def __getattr__(self, name):
         return getattr(self._transport, name)
@@ -231,6 +255,7 @@ class _VolumeCheckedData:
                 raise ValueError("Volume count differs from timestamp count")
             missing = []
             omitted = []
+            seen = set()
             for index, (timestamp, volume) in enumerate(zip(timestamps, volumes, strict=True)):
                 # Yahoo can append a latest quote outside the download window;
                 # that quote must not prevent ingestion of historical bars.
@@ -238,8 +263,9 @@ class _VolumeCheckedData:
                     "period2" in params and timestamp >= params["period2"]
                 ):
                     continue
-                if not _missing_number(volume):
-                    continue
+                if timestamp in seen:
+                    raise DuplicateBarError(f"Yahoo {self._symbol}: duplicate source timestamp {timestamp}.")
+                seen.add(timestamp)
                 # Remove wholly missing bars before yfinance can merge them
                 # into another bar. Missing volume alone never triggers a skip.
                 if self._skip_missing_ohlc and all(
@@ -247,6 +273,14 @@ class _VolumeCheckedData:
                     for column in ("open", "high", "low", "close")
                 ):
                     omitted.append(index)
+                    continue
+                for column in ("open", "high", "low", "close", "volume"):
+                    value = quotes[column][index]
+                    if not _missing_number(value):
+                        _check_numeric_conversion(value, float(value), column)
+                if not _missing_number(volume):
+                    if float(volume) != int(volume):
+                        raise SchemaValidationError("Yahoo source volume must be integral; yfinance would truncate it.")
                     continue
                 missing.append(pd.Timestamp(timestamp, unit="s", tz="UTC").isoformat())
         except (KeyError, IndexError, TypeError, ValueError) as exc:
@@ -258,6 +292,14 @@ class _VolumeCheckedData:
                 + ". Refusing yfinance's conversion of missing volume to zero."
             )
         if omitted:
+            for index in omitted:
+                timestamp = pd.Timestamp(timestamps[index], unit="s", tz="UTC")
+                if self._date_labels:
+                    timezone = result.get("meta", {}).get("exchangeTimezoneName")
+                    if not timezone:
+                        raise SchemaValidationError("Yahoo session-date omissions require exchange timezone metadata.")
+                    timestamp = timestamp.tz_convert(timezone).tz_localize(None).normalize().tz_localize("UTC")
+                self._omissions.append(OmittedBar(timestamp.to_pydatetime(), "all_ohlc_missing"))
             labels = ", ".join(
                 pd.Timestamp(timestamps[index], unit="s", tz="UTC").isoformat()
                 for index in omitted
@@ -303,7 +345,12 @@ def _download_bounds(
     request: DataRequest, *, date_labels: bool
 ) -> tuple[str | datetime, str | datetime]:
     if not date_labels:
-        return request.start, request.end
+        # Yahoo accepts integer epoch seconds. Enclose subsecond bounds and
+        # apply the exact microsecond request after downloading.
+        end = request.end
+        if end.microsecond:
+            end = end.replace(microsecond=0) + timedelta(seconds=1)
+        return request.start.replace(microsecond=0), end
     # Date strings are interpreted by yfinance in the exchange timezone. UTC
     # instants here could omit the first session for exchanges east of UTC.
     # Enclose partial days and apply exact UTC label bounds after normalization.
@@ -378,6 +425,12 @@ def _normalize(
                 or is_complex_dtype(values.dtype)
             ):
                 raise ValueError("real numeric values required")
+            if not is_numeric_dtype(frame[column].dtype):
+                for original, converted in zip(frame[column], values, strict=True):
+                    if original is not None and original is not pd.NA and not (
+                        isinstance(original, Real) and math.isnan(original)
+                    ):
+                        _check_numeric_conversion(original, converted, column)
             # Keep integer/nullable dtypes until validate_ohlcv checks that
             # Float64 can represent every value without a precision loss.
             data[column.lower()] = values.array
@@ -386,3 +439,22 @@ def _normalize(
     # Preserve the index's us/ns precision as well: only validate_ohlcv may
     # cast to the canonical millisecond timestamp after checking for loss.
     return pl.from_pandas(data)
+
+
+def _check_numeric_conversion(original, converted, column: str) -> None:
+    """Catch precision already lost by pandas before schema validation can see it."""
+    if isinstance(original, bool) or not isinstance(original, (Real, Decimal, str)):
+        raise SchemaValidationError(f"Yahoo {column} must contain real numeric values.")
+    if isinstance(original, Integral):
+        exact = int(original) == float(converted)
+    elif isinstance(original, (str, Decimal)):
+        try:
+            before = Decimal(original)
+            after = Decimal(str(converted))
+            exact = before == after
+        except (InvalidOperation, ValueError) as exc:
+            raise SchemaValidationError(f"Yahoo {column} must contain real numeric values.") from exc
+    else:
+        exact = original == converted
+    if not exact:
+        raise SchemaValidationError(f"Yahoo {column} cannot be represented losslessly as Float64.")

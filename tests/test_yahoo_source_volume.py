@@ -8,7 +8,7 @@ import pytest
 from yfinance.base import TickerBase
 from yfinance.data import YfData
 
-from data_pipeline import DataPipeline, DataRequest
+from data_pipeline import DataPipeline, DataRequest, OmittedBar
 from data_pipeline.exceptions import EmptyDataError, InvalidOHLCVError, SchemaValidationError
 from data_pipeline.providers import ProviderRegistry, YFinanceProvider
 
@@ -92,6 +92,11 @@ def test_wholly_missing_bar_is_skipped_before_yfinance_volume_fill(source, tmp_p
     frame = pipeline.read_dataset(result.raw.dataset_id)
     assert frame["volume"].to_list() == [1000., 3000.]
     assert frame["close"].to_list() == [101., 103.]
+    assert result.raw.quality.status == "reported"
+    assert result.raw.quality.omitted_bars == (
+        OmittedBar(request.start + timedelta(hours=1), "all_ohlc_missing"),
+    )
+    assert pipeline.get_metadata(result.raw.dataset_id).quality == result.raw.quality
     assert payload == before
     # Skip policy is local to the fetch; it must not mutate a shared response
     # or change another provider's strict behavior.
@@ -155,3 +160,49 @@ def test_daily_source_volume_uses_same_validation(source, volume):
         result = YFinanceProvider().fetch(daily)
         assert result["volume"].to_list() == [1000., 0., 3000.]
         assert all(timestamp.hour == 0 for timestamp in result["timestamp"])
+
+
+def test_daily_skipped_source_bar_records_session_date_not_open_instant(source):
+    payload, request, _, _ = source
+    raw = payload["chart"]["result"][0]
+    raw["timestamp"] = [int((request.start + timedelta(days=i)).timestamp()) for i in range(3)]
+    quotes = raw["indicators"]["quote"][0]
+    for field in quotes:
+        quotes[field][1] = None
+    start = request.start.replace(hour=0, minute=0)
+    daily = DataRequest("AAPL", start, start + timedelta(days=3), timeframe="1d")
+    with pytest.warns(UserWarning, match="skipped 1 bars"):
+        result = YFinanceProvider(skip_missing_ohlc=True).fetch_result(daily)
+    assert result.quality.omitted_bars == (OmittedBar(start + timedelta(days=1), "all_ohlc_missing"),)
+
+
+@pytest.mark.parametrize("volume", [None, 0, 2000])
+def test_source_omissions_recorded_before_yfinance_can_merge_rows(source, volume):
+    payload, request, _, _ = source
+    raw = payload["chart"]["result"][0]
+    quotes = raw["indicators"]["quote"][0]
+    for name in ("open", "high", "low", "close"):
+        quotes[name][1] = None
+    quotes["volume"][1] = volume
+    with pytest.warns(UserWarning, match="skipped 1 bars"):
+        fetched = YFinanceProvider(skip_missing_ohlc=True).fetch_result(request)
+    assert fetched.quality.omitted_bars == (OmittedBar(request.start + timedelta(hours=1), "all_ohlc_missing"),)
+    assert fetched.frame["volume"].to_list() == [1000., 3000.]
+
+
+@pytest.mark.parametrize("value", [2**53 + 1, 12.5, True])
+def test_raw_volume_cannot_be_rounded_or_truncated_before_validation(source, value):
+    payload, request, _, _ = source
+    payload["chart"]["result"][0]["indicators"]["quote"][0]["volume"][1] = value
+    with pytest.raises(SchemaValidationError):
+        YFinanceProvider().fetch(request)
+
+
+def test_source_duplicate_bars_cannot_be_silently_removed_by_yfinance(source):
+    from data_pipeline import DuplicateBarError
+
+    payload, request, _, _ = source
+    raw = payload["chart"]["result"][0]
+    raw["timestamp"][1] = raw["timestamp"][0]
+    with pytest.raises(DuplicateBarError, match="duplicate source timestamp"):
+        YFinanceProvider().fetch(request)

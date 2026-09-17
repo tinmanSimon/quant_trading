@@ -21,6 +21,7 @@ from ..exceptions import (
 from ..models import DataQuery, DataRequest
 from ..schemas import OHLCV_SCHEMA, validate_ohlcv
 from ..processing.contracts import DataContract
+from ..quality import FetchQuality, merge_quality
 from . import catalog
 from .layout import contained_path, relative_path
 from .locking import store_lock
@@ -70,10 +71,12 @@ class LocalDataStore:
         except duckdb.Error as error:
             raise StorageError(f"Catalog operation failed: {error}") from error
 
-    def write_raw(self, request: DataRequest, frame: pl.DataFrame) -> StoredDataset:
+    def write_raw(
+        self, request: DataRequest, frame: pl.DataFrame, *, quality: FetchQuality | None = None,
+    ) -> StoredDataset:
         canonical = _validate_batch(request, frame)
         with self._session() as connection:
-            return self._write(connection, request, canonical, layer="raw")
+            return self._write(connection, request, canonical, layer="raw", quality=quality)
 
     def write_processed(
         self, parent_id: str | Sequence[str], frame: pl.DataFrame, *, pipeline_id: str,
@@ -120,7 +123,7 @@ class LocalDataStore:
                     )
             return self._write(connection, request, canonical, layer="processed",
                                pipeline_id=pipeline_id, processors_json=processors_json,
-                               parent_ids=parent_ids)
+                               parent_ids=parent_ids, quality=merge_quality([item.quality for item in parents]))
 
     def _raw_parents(self, connection, raw_ids: str | Sequence[str]) -> list[StoredDataset]:
         if isinstance(raw_ids, str):
@@ -152,6 +155,7 @@ class LocalDataStore:
 
     def replace_raw(
         self, dataset_id: str, frame: pl.DataFrame, *, confirm: str,
+        quality: FetchQuality | None = None,
     ) -> StoredDataset:
         if confirm != dataset_id:
             raise ConfirmationRequiredError("confirm must equal the exact dataset ID being replaced.")
@@ -162,7 +166,8 @@ class LocalDataStore:
             canonical = _validate_batch(old.request, frame)
             if _bounds(canonical) != (old.first_timestamp, old.last_timestamp):
                 raise RequestDataMismatchError("Replacement must cover the entire target's first/last bar range.")
-            return self._write(connection, old.request, canonical, layer="raw", supersedes=(dataset_id,))
+            return self._write(connection, old.request, canonical, layer="raw", supersedes=(dataset_id,),
+                               quality=quality)
 
     def compact_raw(self, dataset_ids: list[str], *, confirm: list[str]) -> StoredDataset:
         """Merge whole batches; keep old revisions and retire their derivatives."""
@@ -181,10 +186,15 @@ class LocalDataStore:
                               end=max(item.request.end for item in items))
             frame = pl.concat([self._read_verified(item) for item in items]).sort("symbol", "timestamp")
             return self._write(connection, request, _validate_batch(request, frame),
-                               layer="raw", supersedes=tuple(dataset_ids))
+                               layer="raw", supersedes=tuple(dataset_ids),
+                               quality=merge_quality([item.quality for item in items]))
 
     def _write(self, connection, request, frame, *, layer, pipeline_id="",
-               processors_json="[]", parent_ids=(), supersedes=()) -> StoredDataset:
+               processors_json="[]", parent_ids=(), supersedes=(), quality=None) -> StoredDataset:
+        if quality is None:
+            quality = FetchQuality()
+        if not isinstance(quality, FetchQuality):
+            raise RequestDataMismatchError("quality must be a FetchQuality report.")
         first, last = _bounds(frame)
         existing = catalog.select(connection, DataQuery(
             layer=layer, provider=request.provider, symbol=request.symbol,
@@ -221,6 +231,7 @@ class LocalDataStore:
                 checksum_sha256=_checksum(staged), schema_version=1, created_at=datetime.now(UTC),
                 pipeline_id=pipeline_id, processors_json=processors_json,
                 parent_ids=tuple(parent_ids), supersedes=tuple(supersedes),
+                quality=quality,
             )
             final.parent.mkdir(parents=True, exist_ok=True)
             connection.execute("BEGIN TRANSACTION")
@@ -325,9 +336,9 @@ class LocalDataStore:
         lazy = (pl.scan_parquet(paths, hive_partitioning=False) if paths
                 else pl.DataFrame(schema=OHLCV_SCHEMA).lazy())
         if query.start is not None:
-            lazy = lazy.filter(pl.col("timestamp") >= query.start)
+            lazy = lazy.filter(pl.col("timestamp").cast(pl.Datetime("us", "UTC")) >= pl.lit(query.start, dtype=pl.Datetime("us", "UTC")))
         if query.end is not None:
-            lazy = lazy.filter(pl.col("timestamp") < query.end)
+            lazy = lazy.filter(pl.col("timestamp").cast(pl.Datetime("us", "UTC")) < pl.lit(query.end, dtype=pl.Datetime("us", "UTC")))
         lazy = lazy.sort("symbol", "timestamp")
         if columns is not None:
             if not columns or len(columns) != len(set(columns)) or set(columns) - set(OHLCV_SCHEMA):

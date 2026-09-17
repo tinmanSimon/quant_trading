@@ -1,5 +1,7 @@
 # Data files (too large for git)
 data/
+runs/
+/private_strategies/
 *.csv
 *.parquet
 *.db

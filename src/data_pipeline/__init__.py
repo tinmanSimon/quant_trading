@@ -19,6 +19,7 @@ from .models import DataQuery, DataRequest
 from .schemas import CANONICAL_OHLCV_COLUMNS, OHLCV_SCHEMA, validate_ohlcv
 from .storage import LocalDataStore, RawDataStore, RawDataset, StoredDataset
 from .api import DataPipeline, IngestionResult
+from .quality import FetchQuality, FetchResult, OmittedBar
 
 __all__ = [
     "CANONICAL_OHLCV_COLUMNS",
@@ -29,6 +30,9 @@ __all__ = [
     "DataQuery",
     "DataPipeline",
     "IngestionResult",
+    "FetchQuality",
+    "FetchResult",
+    "OmittedBar",
     "LocalDataStore",
     "StoredDataset",
     "DatasetNotFoundError",

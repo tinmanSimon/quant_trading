@@ -1,0 +1,11 @@
+[
+  {"name": "moving_average_cross", "version": "1", "config": {"fast": 10, "slow": 30}},
+  {"name": "momentum", "version": "1", "config": {"lookback": 20}},
+  {"name": "weighted", "version": "1", "config": {
+    "strategies": [
+      {"name": "moving_average_cross", "version": "1", "config": {"fast": 10, "slow": 30}},
+      {"name": "momentum", "version": "1", "config": {"lookback": 20}}
+    ],
+    "weights": [0.5, 0.5]
+  }}
+]

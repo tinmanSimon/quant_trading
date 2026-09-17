@@ -4,6 +4,266 @@ An OHLCV ingestion package with interchangeable providers, local raw/processed
 Parquet storage, ordered processors, revision history, and a Python/CLI query API.
 Yahoo Finance is the included vendor adapter.
 
+The `research` package adds batch fetching, strict local-data preflight,
+independent-account backtests, versioned strategies and saved comparisons.
+A local Streamlit dashboard provides dataset navigation and interactive charts.
+
+## Research quick start
+
+Activate the environment once per terminal, then use the short commands:
+
+```bash
+source venv/bin/activate
+python -m pip install -r requirements.txt -r requirements-dev.txt
+python -m pip install -e . --no-deps
+```
+
+Fetch every ticker independently. Failures identify their ticker, other tickers
+are still attempted, and the command exits nonzero if any request failed:
+
+```bash
+quant-research fetch --tickers AAPL MSFT --timeframe 1d \
+  --start 2024-01-01 --end 2025-01-01 --skip-missing-ohlc
+```
+
+Omitting `--skip-missing-ohlc` keeps strict Yahoo validation. Enabling it records
+each wholly missing OHLC bar's UTC timestamp and reason alongside its immutable
+dataset revision; missing volume is never silently changed to zero. Existing
+overlapping data raises an error instead of being overwritten. Fetch requests
+still obey Yahoo's availability/retention limits.
+
+Run the three example strategies independently against every ticker:
+
+```bash
+quant-research backtest --tickers AAPL MSFT --timeframe 1d \
+  --start 2024-03-01 --end 2025-01-01 --strategies strategies.example.json \
+  --initial-cash 10000 --commission-bps 5 --slippage-bps 5
+quant-research list-runs
+```
+
+All dates have an inclusive start and exclusive end. The fetch begins earlier
+than the backtest because strategies need preceding warm-up history. These are
+example historical daily ranges; choose recent ranges for Yahoo hourly data.
+`python -m research` also works in place of `quant-research`.
+
+Launch the dashboard from the repository root:
+
+```bash
+python -m streamlit run src/dashboard/app.py
+```
+
+Open the local URL printed by Streamlit. The sidebar selects **Market data**,
+**Fetch**, **Backtest**, or **Saved runs**, and the data/results roots. Dataset
+charts have candlesticks, volume, drag/scroll zoom, a range slider and reset
+controls. They show original bars without resampling or gap filling. Intraday
+display timezones are selectable; daily timestamps remain session-date labels.
+Recorded omissions and unknown historical provenance are displayed explicitly.
+Large ranges can be slow to render; narrow the visible date range as needed.
+
+The same workflow is available from an interactive Python session:
+
+```python
+from datetime import UTC, datetime
+from research import Research
+from research.strategies import MovingAverageCross, Momentum, WeightedStrategy
+from research.backtesting import ExecutionSettings
+
+research = Research("data", "runs")
+start = datetime(2024, 3, 1, tzinfo=UTC)
+end = datetime(2025, 1, 1, tzinfo=UTC)
+strategies = [MovingAverageCross(10, 30), Momentum(20)]
+strategies.append(WeightedStrategy(strategies, [0.5, 0.5]))
+report = research.preflight(["AAPL", "MSFT"], strategies=strategies,
+                            start=start, end=end, timeframe="1d")
+print(report.to_frame())  # Empty when no blocking issues were found.
+run = research.backtest(["AAPL", "MSFT"], strategies=strategies,
+                        start=start, end=end, timeframe="1d",
+                        settings=ExecutionSettings(commission_bps=5, slippage_bps=5))
+print(run.comparison)
+restored = research.load_run(run.run_id)
+```
+
+### Data checks and simulation rules
+
+Before any strategy is evaluated, every ticker must have every required bar,
+including warm-up, on the selected exchange schedule. Preflight checks actual
+timestamps, holidays, DST, early closes, session alignment, completed bars,
+file checksums and canonical values. Missing, unexpected, corrupt or unfinished
+bars abort the entire request with ticker-specific details. Bounds in the
+catalog alone do not establish completeness. Backtests never fetch or fabricate
+missing data. The initial supported inputs are raw `1h` and `1d` bars for USD
+instruments, using the explicitly selected calendar (default `XNYS`, U.S.
+regular equity sessions). The calendar is a user-selected assumption, not
+automatic exchange discovery; choose the appropriate calendar for the symbol.
+Hourly calendars with lunch breaks are rejected.
+
+A skipped bar blocks a test when its absence affects the test or warm-up window.
+Omissions outside that window do not block it. Legacy datasets have `unknown`
+fetch provenance, which remains visible; they can pass only after their actual
+bars pass coverage checks. A quality report records what ingestion observed,
+and cannot prove the provider supplied every real trade or correct prices.
+Replacements receive fresh reports; processing/compaction preserve lineage and
+combined reports. Old recorded omissions do not override a bar now present.
+
+Each strategy/ticker pair starts with its own cash account. There is no shared
+capital portfolio, leverage, short selling or fractional-share trading.
+At each completed bar, the strategy returns a target allocation in `[0, 1]`.
+That target is rebalanced at the next available scheduled bar's open using
+that open's price plus configured adverse slippage. Fees and price gaps are
+included in affordability calculations; buys are reduced or rejected when
+needed. Rejections are recorded. Zero-volume bars cannot execute orders.
+The exact cash ledger uses Decimal arithmetic, fees round upward to eight
+decimal places, and cash/holdings/equity must stay nonnegative. Float columns
+are for plotting; `*_exact` columns preserve ledger values.
+
+Strategies receive isolated history containing only completed preceding bars.
+Warm-up observations can produce the first test trade, but never contain test
+fills. Each strategy/ticker has fresh state. Future-row perturbation tests,
+manual fee/slippage examples and ledger invariants verify these rules. Custom
+Python code can still access outside information; this API is not a sandbox
+against a strategy that deliberately reads future data elsewhere. Arbitrary
+preprocessed histories are excluded because valid timestamps alone cannot
+establish that their transformations were causal.
+
+This first engine reports **price returns**, with open positions valued at the
+last included close. It does not credit dividends, reconstruct corporate
+actions, model settlement, exchange order queues, market impact, or constrain
+fills to a fraction of positive reported volume. It assumes positive-volume
+bars can execute the requested affordable quantity at the slipped open.
+Yahoo's vendor-provided historical split treatment remains in its raw prices;
+these results are not a reconstruction of a broker account across corporate
+actions. There is no live order execution. These assumptions are also saved
+in result metadata.
+
+### Strategies, results and reproducibility
+
+Built-ins are moving-average crossover, positive momentum, and weighted
+combinations of strategy target allocations. Combining strategies produces
+one target and one account; it does not sum independent equity curves.
+Implement `research.strategies.Strategy` with `name`, `version`, JSON `config`,
+positive `lookback`, and `target_weight(history)`. Pass instances directly or
+register factories in `StrategyRegistry` and provide it to `Research`.
+Version custom code whenever its behavior changes; external custom strategy
+source is not automatically archived or fingerprinted.
+
+### Private strategies
+
+Personal implementations live in the root-level `private_strategies/` package.
+The entire directory is Git-ignored and is outside the installable `src/`
+packages. It is local to your checkout: a fresh clone will not contain your
+private files. Back them up separately. Ignore rules do not remove files that
+were previously tracked or protect files from local access.
+
+```text
+private_strategies/
+├── __init__.py
+├── register.py       # One explicit registration hook
+└── example.py        # Local starter example; replace with your own code
+```
+
+The local starter registers **Private example (momentum)** in the dashboard.
+Its implementation subclasses the existing momentum strategy to demonstrate
+loading; it is not a new trading model. To add your own strategy, implement
+the normal `Strategy` interface and register it in `register.py`, for example:
+
+```python
+from .my_strategy import MyStrategy
+
+def register_strategies(registry):
+    registry.register(
+        "my_strategy", "1", lambda config: MyStrategy(**config),
+        label="My Strategy",
+        description="My personal strategy.",
+        default_config={"window": 20},
+        parameters={
+            "window": {"type": "integer", "minimum": 1, "label": "History bars"},
+        },
+    )
+```
+
+The instance's `name` and `version` must match the registration. Use relative
+imports between private files, such as `from .my_strategy import MyStrategy`.
+Only implementations registered by this hook are offered; unrelated Python
+files are not automatically imported. The loader imports the trusted local
+package under an internal namespace without modifying Python's search path.
+
+Restart the dashboard after editing private Python files. Modules are imported
+once per process; fresh registries prevent duplicate registration on page reruns.
+Missing `private_strategies/` is allowed and leaves built-ins available. An
+existing but broken package, missing registration hook, invalid metadata, or
+duplicate name/version raises a visible error instead of silently hiding the
+problem. The loader searches relative to the installed source checkout, not
+the current working directory or the selected data directory.
+
+On **Backtest**, select your strategy from **Strategies**. Controls are generated
+from its parameter descriptions:
+
+| Parameter type | Control |
+|---|---|
+| `integer`, `number` | Numeric input; optional `minimum`, `maximum`, and `step` |
+| `boolean` | Checkbox |
+| `string` | Text input |
+| Any scalar type with `choices` | Dropdown |
+| `json`, missing descriptions, or partially described configuration | Complete JSON configuration editor |
+
+Every described parameter requires a value in `default_config`. Optional `label`
+and `help` fields control presentation. Registration validates metadata/defaults;
+loading validates declared types, choices and bounds before calling the factory.
+The strategy constructor remains responsible for relationships between fields,
+such as `fast < slow`. Existing registrations without presentation metadata
+remain valid and get a JSON editor. Numeric values too large for exact browser
+integer inputs also use JSON. A JSON-editing checkbox is available for structured
+controls; the two editing modes retain their own values.
+
+Select multiple strategies and enable **Also test a weighted combination** to
+combine any registered strategies, including private ones. The displayed weights
+are relative, normalized to sum to one, and must include a positive weight.
+Each selected strategy is tested separately as well as in the combined account.
+
+The same discovery is used by `Research` when loading specifications and by
+`quant-research backtest --strategies your-specs.json`. Private imports are lazy:
+viewing market data or reopening saved results does not require the private code.
+To select a different private package location explicitly in Python:
+
+```python
+from research import Research
+from research.strategies import load_registry
+
+registry = load_registry(project_dir="/path/to/project")
+research = Research(strategies=registry)
+```
+
+Saved runs include strategy names, versions and parameter values, but do not
+copy private source. Keep sensitive values out of shared manifests/screenshots.
+Bump a private strategy's version whenever its behavior changes. Private loading
+does not change the engine's execution rules or add session-end liquidation.
+
+Each successful request creates an immutable directory under `runs/` with a
+manifest and Parquet equity, trade and order tables. The manifest records
+strategy configurations, costs, source revision IDs/checksums, quality,
+calendar/version, research code fingerprint and return assumptions. The
+entire run is published after all simulations succeed; failed simulations
+produce no partial visible run. Loading verifies artifact checksums.
+`compare_runs([id1, id2])` rejects different data revisions, periods, warm-up
+lengths, calendars, package versions, account settings or engine fingerprints. Preserve original dataset revisions
+and the code/environment to reproduce a run; checksums detect accidental
+changes, not adversarial rewriting of both a file and its checksum.
+
+```text
+src/
+├── data_pipeline/         # Providers, canonical values, quality and storage
+├── research/
+│   ├── api.py            # Research application interface
+│   ├── batch_fetch.py    # Per-ticker fetch outcomes
+│   ├── datasets.py       # All-ticker checks and pinned revision snapshots
+│   ├── instruments.py    # Explicit exchange calendars and bar intervals
+│   ├── strategies/      # Versioned strategies and weighted combinations
+│   ├── backtesting/     # Causal execution, cash accounting and metrics
+│   ├── runs.py           # Atomic saved runs and compatible comparisons
+│   └── cli.py            # quant-research command
+└── dashboard/            # Streamlit navigation and Plotly charts
+```
+
 ## Development setup
 
 The committed `requirements.txt` file contains runtime dependencies. Install
@@ -25,7 +285,8 @@ Run the normal, offline test suite with:
 
 Tests use per-test temporary directories and deterministic fixtures under
 `tests/fixtures/`; they must not read from or write to the repository's
-`data/` directory. Live vendor checks are marked `network` and skipped unless
+`data/` directory. Private-strategy discovery is redirected to temporary test
+locations so tests never execute your personal implementations. Live vendor checks are marked `network` and skipped unless
 explicitly enabled:
 
 ```bash
@@ -402,9 +663,9 @@ pipeline = DataPipeline("data", providers=providers)
 
 The storage, processors and query API remain unchanged. Bloomberg itself is not
 implemented and would require the vendor SDK/credentials and its own adapter.
-This version supports OHLCV ingestion, OHLCV transformations and explicit-session
-hourly-to-daily resampling. Additional column schemas and automatic exchange
-calendar integration are not implemented.
+The data package supports OHLCV ingestion, transformations and explicit-session
+hourly-to-daily resampling. Research preflight adds selected exchange calendars;
+it does not discover an instrument's exchange or currency automatically.
 
 Implementation references: [Yahoo download options](https://ranaroussi.github.io/yfinance/reference/api/yfinance.download.html),
 [DuckDB concurrency](https://duckdb.org/docs/current/connect/concurrency),

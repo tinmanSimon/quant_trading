@@ -11,6 +11,7 @@ dynamic = ["dependencies"]
 
 [project.scripts]
 data-pipeline = "data_pipeline.cli:main"
+quant-research = "research.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

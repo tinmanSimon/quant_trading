@@ -31,7 +31,8 @@ class DataPipeline:
     ) -> IngestionResult:
         pipeline = _pipeline(processors)
         provider = self.providers.get(request.provider)
-        raw = self.store.write_raw(request, provider.fetch(request))
+        fetched = provider.fetch_result(request)
+        raw = self.store.write_raw(request, fetched.frame, quality=fetched.quality)
         return self._finish_ingestion(raw, pipeline)
 
     def ingest_frame(
@@ -85,8 +86,8 @@ class DataPipeline:
         old = self.store.get_metadata(raw_id)
         if old.layer != "raw" or not old.active:
             raise RequestDataMismatchError("Replacement requires an active raw dataset ID.")
-        frame = self.providers.get(old.request.provider).fetch(old.request)
-        return self.store.replace_raw(raw_id, frame, confirm=confirm)
+        fetched = self.providers.get(old.request.provider).fetch_result(old.request)
+        return self.store.replace_raw(raw_id, fetched.frame, confirm=confirm, quality=fetched.quality)
 
     def list_datasets(self, query: DataQuery | None = None) -> list[StoredDataset]:
         return self.store.list_datasets(query)

@@ -1,11 +1,12 @@
 """Serializable metadata for immutable Parquet batches and their lineage."""
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 import json
 
 from ..models import DataRequest
 from ..processing.contracts import DataContract
+from ..quality import FetchQuality
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,7 @@ class StoredDataset:
     parent_ids: tuple[str, ...] = ()
     supersedes: tuple[str, ...] = ()
     active: bool = True
+    quality: FetchQuality = field(default_factory=FetchQuality)
 
     @property
     def timestamp_convention(self) -> str:
@@ -50,6 +52,7 @@ class StoredDataset:
         for name in ("parent_ids", "supersedes"):
             fields[name] = tuple(fields[name])
         fields["active"] = active
+        fields["quality"] = FetchQuality.from_dict(fields.get("quality"))
         return cls(**fields)
 
 

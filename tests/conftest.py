@@ -23,6 +23,13 @@ def pytest_collection_modifyitems(config, items):
 
 
 @pytest.fixture(autouse=True)
+def isolate_private_strategy_discovery(tmp_path, monkeypatch):
+    """Tests must never import the user's actual personal strategy package."""
+    from research.strategies import loader
+    monkeypatch.setattr(loader, "project_root", lambda: tmp_path / "test-project")
+
+
+@pytest.fixture(autouse=True)
 def prevent_accidental_yahoo_requests(request, monkeypatch):
     """Offline tests must deliberately mock downloads instead of reaching Yahoo."""
     if "network" not in request.keywords:

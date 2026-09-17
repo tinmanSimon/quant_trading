@@ -9,6 +9,7 @@ import polars as pl
 
 from ..exceptions import InvalidDataRequestError
 from ..models import DataRequest
+from ..quality import FetchResult
 
 
 class BaseDataProvider(ABC):
@@ -25,6 +26,10 @@ class BaseDataProvider(ABC):
     def fetch(self, request: DataRequest) -> pl.DataFrame:
         """Fetch a provider-neutral request without changing its semantics."""
         raise NotImplementedError
+
+    def fetch_result(self, request: DataRequest) -> FetchResult:
+        """Fetch with provenance; legacy providers explicitly report unknown quality."""
+        return FetchResult(self.fetch(request))
 
     def fetch_ohlcv(
         self,
