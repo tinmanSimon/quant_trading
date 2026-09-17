@@ -8,6 +8,24 @@ from data_pipeline.base_fetcher import BaseDataProvider, OHLCV_SCHEMA
 from data_pipeline.yahoo_fetcher import YFinanceProvider
 
 
+def test_processor_subpackage_preserves_public_imports() -> None:
+    from data_pipeline.processing import BaseProcessor, ResampleOHLCV, ScalePrices, TradingSession
+    from data_pipeline.processing import processors
+    from data_pipeline.processing.processors.base import BaseProcessor as BaseImplementation
+    from data_pipeline.processing.processors.scaling import ScalePrices as ScalingImplementation
+    from data_pipeline.processing.processors.resampling import (
+        ResampleOHLCV as ResamplingImplementation,
+        TradingSession as SessionImplementation,
+    )
+
+    assert BaseProcessor is processors.BaseProcessor is BaseImplementation
+    assert ScalePrices is processors.ScalePrices is ScalingImplementation
+    assert ResampleOHLCV is processors.ResampleOHLCV is ResamplingImplementation
+    assert TradingSession is processors.TradingSession is SessionImplementation
+    assert issubclass(ScalePrices, BaseProcessor)
+    assert issubclass(ResampleOHLCV, BaseProcessor)
+
+
 def test_current_provider_implementation_imports() -> None:
     """Existing providers must load without making a network request."""
     assert issubclass(YFinanceProvider, BaseDataProvider)

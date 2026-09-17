@@ -57,6 +57,22 @@ def validate_ohlcv(frame: pl.DataFrame) -> pl.DataFrame:
     if frame.is_empty():
         raise EmptyDataError("OHLCV data must contain at least one bar.")
 
+    # Casting datetime precision is otherwise truncating, even with strict=True.
+    unit = frame.schema["timestamp"].time_unit
+    divisor = {"ms": 1, "us": 1_000, "ns": 1_000_000}[unit]
+    if frame.select(((pl.col("timestamp").cast(pl.Int64) % divisor) != 0).any()).item():
+        raise SchemaValidationError("timestamp precision would be lost at milliseconds.")
+    for column in _NUMERIC_COLUMNS:
+        dtype = frame.schema[column]
+        if dtype.is_integer() or dtype.is_decimal():
+            original = frame[column]
+            try:
+                restored = original.cast(pl.Float64).cast(dtype, strict=True)
+            except pl.exceptions.PolarsError as error:
+                raise SchemaValidationError(f"{column} cannot be represented losslessly as Float64.") from error
+            if not original.equals(restored):
+                raise SchemaValidationError(f"{column} cannot be represented losslessly as Float64.")
+
     canonical = frame.select(
         [
             pl.col("timestamp")
@@ -117,6 +133,7 @@ def _validate_key_values(frame: pl.DataFrame) -> None:
             pl.col("timestamp").is_null()
             | pl.col("symbol").is_null()
             | (pl.col("symbol").str.strip_chars().str.len_chars() == 0)
+            | (pl.col("symbol") != pl.col("symbol").str.strip_chars())
         )
         .any()
         .alias("has_invalid_key")

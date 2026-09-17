@@ -9,6 +9,31 @@ import pytest
 import polars as pl
 
 
+def pytest_addoption(parser):
+    parser.addoption("--run-network", action="store_true", default=False,
+                     help="Allow explicitly marked live vendor tests")
+
+
+def pytest_collection_modifyitems(config, items):
+    if not config.getoption("--run-network"):
+        skip = pytest.mark.skip(reason="Live vendor test; pass --run-network to opt in")
+        for item in items:
+            if "network" in item.keywords:
+                item.add_marker(skip)
+
+
+@pytest.fixture(autouse=True)
+def prevent_accidental_yahoo_requests(request, monkeypatch):
+    """Offline tests must deliberately mock downloads instead of reaching Yahoo."""
+    if "network" not in request.keywords:
+        import yfinance as yf
+
+        def blocked(*args, **kwargs):
+            raise AssertionError("Unexpected live Yahoo request in an offline test")
+
+        monkeypatch.setattr(yf, "download", blocked)
+
+
 @pytest.fixture
 def isolated_data_dir(tmp_path: Path) -> Path:
     """Return a per-test data directory that is never the project's real data/ root."""
