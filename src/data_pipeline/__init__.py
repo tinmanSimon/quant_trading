@@ -17,7 +17,10 @@ from .exceptions import (
 )
 from .models import DataQuery, DataRequest
 from .schemas import CANONICAL_OHLCV_COLUMNS, OHLCV_SCHEMA, validate_ohlcv
-from .storage import LocalDataStore, RawDataStore, RawDataset, StoredDataset
+from .storage import (
+    DeletionCleanupError, DeletionPlan, DeletionPlanStaleError, DeletionReport,
+    LocalDataStore, RawDataStore, RawDataset, StoredDataset,
+)
 from .api import DataPipeline, IngestionResult
 from .quality import FetchQuality, FetchResult, OmittedBar
 
@@ -36,6 +39,10 @@ __all__ = [
     "LocalDataStore",
     "StoredDataset",
     "DatasetNotFoundError",
+    "DeletionPlan",
+    "DeletionReport",
+    "DeletionPlanStaleError",
+    "DeletionCleanupError",
     "DuplicateBarError",
     "EmptyDataError",
     "InvalidDataRequestError",

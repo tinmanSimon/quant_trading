@@ -8,6 +8,7 @@ import streamlit as st
 
 from data_pipeline import DataQuery
 from dashboard.charts import CHART_CONFIG, bar_table, line_chart, price_chart
+from dashboard.deletion import deletion_page
 from dashboard.strategy_controls import strategy_specs
 from research import PreflightError, Research, ResearchError
 from research.backtesting import ExecutionSettings
@@ -282,7 +283,7 @@ def main():
         data_dir = st.text_input("Data directory", "data")
         runs_dir = st.text_input("Research runs directory", "runs")
         st.caption(f"Data: {Path(data_dir).expanduser().resolve()}")
-        page = st.radio("Navigate", ["Market data", "Fetch", "Backtest", "Saved runs"])
+        page = st.radio("Navigate", ["Market data", "Fetch", "Backtest", "Saved runs", "Delete data"])
         st.caption("Local data · reproducible research")
     # A store switch must not leave results from another directory on screen.
     identity = (str(Path(data_dir).expanduser().resolve()), str(Path(runs_dir).expanduser().resolve()))
@@ -293,7 +294,7 @@ def main():
     try:
         research = Research(data_dir=data_dir, runs_dir=runs_dir)
         {"Market data": _data_page, "Fetch": _fetch_page,
-         "Backtest": _backtest_page, "Saved runs": _runs_page}[page](research)
+         "Backtest": _backtest_page, "Saved runs": _runs_page, "Delete data": deletion_page}[page](research)
     except Exception as error:
         # Domain errors are displayed while preserving the local store; full
         # traceback remains available for diagnosing a failed operation.

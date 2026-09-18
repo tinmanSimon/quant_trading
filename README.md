@@ -618,18 +618,84 @@ identity into one file. It retains old revisions and invalidates their derived
 outputs; rerun processing on the compacted raw ID. Compaction reduces files
 read by active queries, but retaining history uses additional disk space.
 
+### Delete local data and reclaim storage
+
+Open **Delete data** in the dashboard. Select raw or processed, provider, ticker,
+timeframe and a UTC start/end; processed data also requires a specific pipeline.
+Preview the affected revisions, review the row counts, then check the confirmation
+box and click **Delete permanently**. The interval is `[start, end)`: the start
+is included and the end is excluded. For daily data, timestamps are UTC session
+date labels as described above.
+
+The Python API provides the same preview and confirmation flow:
+
+```python
+from datetime import UTC, datetime
+from data_pipeline import DataPipeline, DataQuery
+
+pipeline = DataPipeline("data")
+plan = pipeline.plan_delete(DataQuery(
+    layer="raw", provider="yahoo", symbol="AAPL", timeframe="1h",
+    start=datetime(2025, 1, 1, tzinfo=UTC),
+    end=datetime(2025, 2, 1, tzinfo=UTC),
+))
+print(plan.to_frame())
+# Execute only after reviewing the selection above.
+report = pipeline.delete(plan, confirm=plan.operation_id)
+print(report.to_dict())
+```
+
+Deletion covers matching rows in **all cataloged revisions**, including inactive
+history. It physically removes the affected original Parquet files and any known
+copies of those revisions in staging/quarantine. Partial files are rewritten as
+separate before/after batches, with the surviving values and precision unchanged.
+No original-file backups are retained. Counts include stored rows across revisions,
+so several revisions of a bar count several times. Reported bytes are file sizes,
+not a measurement of filesystem free space; small partial deletions can increase
+storage because each surviving file has its own overhead. Rewriting also requires
+temporary free space. Deleting entire batches avoids rewriting their contents.
+
+Raw and processed layers are independent: deleting either leaves the other's
+files, active flags and contents unchanged. Other processed pipeline variants are
+also untouched. Rewritten batches receive new IDs; their old IDs are recorded in
+catalog tombstones but can no longer be read. Processed provenance and saved runs retain
+their original source IDs, so deleting those sources prevents reproducing those
+runs from this store. To regenerate a whole processed output from the same raw
+parents, first delete that whole output: partial deletion retains the existing
+same-parent/pipeline duplicate protection.
+
+Previews are tied to a data root and its selected revisions. Changes to that
+selection require a fresh preview. After the catalog transaction commits, physical
+cleanup must finish before an operation reports `completed`. If cleanup fails,
+the dashboard displays a pending operation with a retry action; Python callers
+can inspect `pipeline.list_deletions(pending_only=True)` and call
+`pipeline.recover()`. Recovery also removes unfinished deletion rewrites from
+before a catalog commit; those preparations leave the original data unchanged.
+New deletions are blocked until pending cleanup finishes.
+The catalog automatically migrates from version 1 to
+version 2 to store deletion journals and tombstones.
+
+This deletes files owned by the store and identified by the catalog/journals; it
+does not erase external backups, saved-run results, or unrelated orphan files
+already in quarantine. It performs normal filesystem deletion, not secure wiping.
+
 Writers stage, validate the Parquet round trip, flush the file, publish with an
 exclusive hard link, and commit the DuckDB transaction. The catalog is the
 visibility boundary. A POSIX file lock serializes readers of the catalog and
-writers across processes. File contents are immutable, so lazy query snapshots
-remain valid across replacement. This implementation targets local Linux/macOS
-filesystems with hard-link/flock/fsync support; network shares and Windows are
+writers across processes. Reads finish loading under that lock, so a concurrent
+deletion cannot remove their input midway. `scan()` still returns a `LazyFrame`,
+but loads its filtered/projected rows into memory before returning; the snapshot
+remains usable after deletion. Select narrow ranges and columns for large stores.
+This implementation targets local Linux/macOS filesystems with
+hard-link/flock/fsync support; network shares and Windows are
 not supported. Do not modify the catalog or files outside the package while it
 is running. Back up the entire data root, including catalog and history.
 
 Ordinary failures roll back changes. An abrupt process termination can leave
-uncataloged files; `recover` moves them into quarantine without deleting them.
-`audit` verifies all active and historical data. Missing/corrupt cataloged files
+uncataloged files from ordinary writes; `recover` moves them into quarantine.
+It first cleans up deletion preparations and finishes committed deletions, so
+deleted originals are removed rather than quarantined.
+`audit` verifies all surviving active and historical data. Missing/corrupt cataloged files
 raise errors; recovery does not fabricate their contents.
 If data files remain but the catalog is missing, all store operations stop with
 an integrity error: restore the catalog from a consistent backup. `recover`
@@ -642,9 +708,10 @@ It does not rebuild a lost catalog or silently initialize missing catalog tables
 ```
 
 Reads verify SHA-256 and schema. Single-dataset reads/audits also validate row
-counts, bounds and OHLCV values. Lazy range queries prune catalog entries and
-push filters/projections into Parquet; checksum verification still reads each
-selected file once. `coverage` reports actual bounds, not proof of complete
+counts, bounds and OHLCV values. Range queries prune catalog entries and
+push filters/projections into Parquet before taking an in-memory snapshot;
+checksum verification still reads each selected file once.
+`coverage` reports actual bounds, not proof of complete
 exchange-session coverage. Querying mixed providers/timeframes/pipelines is
 rejected rather than returning ambiguous duplicate-looking bars.
 

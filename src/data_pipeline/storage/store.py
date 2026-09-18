@@ -23,6 +23,7 @@ from ..schemas import OHLCV_SCHEMA, validate_ohlcv
 from ..processing.contracts import DataContract
 from ..quality import FetchQuality, merge_quality
 from . import catalog
+from .deletion import DeletionPlan, DeletionReport
 from .layout import contained_path, relative_path
 from .locking import store_lock
 from .models import StoredDataset
@@ -32,8 +33,8 @@ class LocalDataStore:
     """A local POSIX store. All catalog operations hold one cross-process lock.
 
     Immutable files are flushed before publication; the DuckDB commit is the
-    visibility boundary. Abandoned files after abrupt termination are retained
-    by ``recover`` in quarantine. Reads by ID include historical revisions.
+    visibility boundary. Recovery finishes committed deletion cleanup before
+    quarantining abandoned writes. Reads by ID include surviving history.
     """
 
     def __init__(self, data_dir: str | Path, *, lock_timeout: float = 10) -> None:
@@ -297,7 +298,12 @@ class LocalDataStore:
             return catalog.select(connection, DataQuery()) + catalog.select(connection, DataQuery(layer="processed"))
 
     def read_dataset(self, dataset_id: str) -> pl.DataFrame:
-        return self._read_verified(self.get_metadata(dataset_id))
+        # Physical deletion can remove an immutable file. Keep lookup,
+        # verification and materialization within the same store lock.
+        with self._session(create=False) as connection:
+            if connection is None:
+                raise DatasetNotFoundError(f"Dataset {dataset_id!r} was not found.")
+            return self._read_verified(catalog.get(connection, dataset_id))
 
     def _verified_path(self, item: StoredDataset) -> Path:
         if item.schema_version != 1:
@@ -324,35 +330,62 @@ class LocalDataStore:
             raise DataIntegrityError(f"Cannot read dataset {item.dataset_id}: {error}") from error
 
     def scan(self, query: DataQuery, *, columns: list[str] | None = None) -> pl.LazyFrame:
-        """Snapshot immutable files, verify checksums, then push filters into Parquet scans."""
+        """Return a lazy view of a verified in-memory snapshot.
+
+        Materialize the requested projection/range while holding the store lock;
+        the returned LazyFrame never keeps disk files alive or races deletion.
+        Narrow query bounds to keep snapshot memory use small.
+        """
         if query.include_history:
             raise RequestDataMismatchError("Query history via list_datasets and read_dataset by ID; revisions may overlap.")
-        items = self.list_datasets(query)
-        identities = {(_identity(item.request), item.pipeline_id) for item in items}
-        # Multiple symbols are fine; provider/timeframe/pipeline mixtures are ambiguous.
-        if len({(identity[0][0], identity[0][1], identity[0][3], identity[1]) for identity in identities}) > 1:
-            raise RequestDataMismatchError("Narrow query to a single provider, timeframe and processor pipeline.")
-        paths = [str(self._verified_path(item)) for item in items]
-        lazy = (pl.scan_parquet(paths, hive_partitioning=False) if paths
-                else pl.DataFrame(schema=OHLCV_SCHEMA).lazy())
-        if query.start is not None:
-            lazy = lazy.filter(pl.col("timestamp").cast(pl.Datetime("us", "UTC")) >= pl.lit(query.start, dtype=pl.Datetime("us", "UTC")))
-        if query.end is not None:
-            lazy = lazy.filter(pl.col("timestamp").cast(pl.Datetime("us", "UTC")) < pl.lit(query.end, dtype=pl.Datetime("us", "UTC")))
-        lazy = lazy.sort("symbol", "timestamp")
         if columns is not None:
             if not columns or len(columns) != len(set(columns)) or set(columns) - set(OHLCV_SCHEMA):
                 raise RequestDataMismatchError("Select distinct canonical OHLCV columns.")
-            lazy = lazy.select(columns)
-        return lazy
+        with self._session(create=False) as connection:
+            items = [] if connection is None else catalog.select(connection, query)
+            identities = {(_identity(item.request), item.pipeline_id) for item in items}
+            # Multiple symbols are fine; provider/timeframe/pipeline mixtures are ambiguous.
+            if len({(identity[0][0], identity[0][1], identity[0][3], identity[1]) for identity in identities}) > 1:
+                raise RequestDataMismatchError("Narrow query to a single provider, timeframe and processor pipeline.")
+            paths = [str(self._verified_path(item)) for item in items]
+            lazy = (pl.scan_parquet(paths, hive_partitioning=False) if paths
+                    else pl.DataFrame(schema=OHLCV_SCHEMA).lazy())
+            if query.start is not None:
+                lazy = lazy.filter(pl.col("timestamp").cast(pl.Datetime("us", "UTC")) >= pl.lit(query.start, dtype=pl.Datetime("us", "UTC")))
+            if query.end is not None:
+                lazy = lazy.filter(pl.col("timestamp").cast(pl.Datetime("us", "UTC")) < pl.lit(query.end, dtype=pl.Datetime("us", "UTC")))
+            lazy = lazy.sort("symbol", "timestamp")
+            if columns is not None:
+                lazy = lazy.select(columns)
+            return lazy.collect().lazy()
 
     def read(self, query: DataQuery, *, columns: list[str] | None = None) -> pl.DataFrame:
         return self.scan(query, columns=columns).collect()
 
+    def plan_delete(self, query: DataQuery) -> DeletionPlan:
+        """Preview exact physical deletion across all revisions of one identity."""
+        from .deletion import plan_delete
+        return plan_delete(self, query)
+
+    def delete(self, plan: DeletionPlan, *, confirm: str) -> DeletionReport:
+        """Execute a confirmed preview without modifying another data layer."""
+        from .deletion import execute_delete
+        return execute_delete(self, plan, confirm=confirm)
+
+    def deletion_status(self, operation_id: str) -> DeletionReport:
+        from .deletion import get_deletion_report
+        return get_deletion_report(self, operation_id)
+
+    def list_deletions(self, *, pending_only: bool = False) -> list[DeletionReport]:
+        from .deletion import list_deletions
+        return list_deletions(self, pending_only=pending_only)
+
     def recover(self) -> list[str]:
-        """Move uncommitted Parquet/staging artifacts to quarantine; never delete history."""
+        """Finish confirmed deletions, then quarantine unrelated abandoned writes."""
+        from .deletion import resume_deletions
         moved = []
         with self._session() as connection:
+            moved.extend(f"deletion:{key}" for key in resume_deletions(self, connection))
             known = {row[0] for row in connection.execute("SELECT relative_path FROM datasets").fetchall()}
             for folder in ("raw", "processed", "staging"):
                 base = contained_path(self.data_dir, folder)
@@ -369,11 +402,14 @@ class LocalDataStore:
 
     def audit(self) -> list[str]:
         """Verify all cataloged revisions, returning IDs that passed integrity checks."""
-        items = self.list_datasets(DataQuery(include_history=True))
-        items += self.list_datasets(DataQuery(layer="processed", include_history=True))
-        for item in items:
-            self._read_verified(item)
-        return [item.dataset_id for item in items]
+        with self._session(create=False) as connection:
+            if connection is None:
+                return []
+            items = catalog.select(connection, DataQuery(include_history=True))
+            items += catalog.select(connection, DataQuery(layer="processed", include_history=True))
+            for item in items:
+                self._read_verified(item)
+            return [item.dataset_id for item in items]
 
     # Initial raw-store API remains available.
     get_raw = get_metadata

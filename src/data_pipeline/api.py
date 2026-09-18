@@ -10,7 +10,7 @@ from .exceptions import ProcessingError
 from .models import DataQuery, DataRequest
 from .processing import Pipeline, Processor
 from .providers import ProviderRegistry, registry as default_providers
-from .storage import LocalDataStore, StoredDataset
+from .storage import DeletionPlan, DeletionReport, LocalDataStore, StoredDataset
 
 
 @dataclass(frozen=True)
@@ -107,6 +107,24 @@ class DataPipeline:
 
     def scan(self, query: DataQuery, *, columns: list[str] | None = None) -> pl.LazyFrame:
         return self.store.scan(query, columns=columns)
+
+    def plan_delete(self, query: DataQuery) -> DeletionPlan:
+        """Preview physical deletion in one layer, including historical revisions."""
+        return self.store.plan_delete(query)
+
+    def delete(self, plan: DeletionPlan, *, confirm: str) -> DeletionReport:
+        """Physically remove only the confirmed selection; layers are independent."""
+        return self.store.delete(plan, confirm=confirm)
+
+    def deletion_status(self, operation_id: str) -> DeletionReport:
+        return self.store.deletion_status(operation_id)
+
+    def list_deletions(self, *, pending_only: bool = False) -> list[DeletionReport]:
+        return self.store.list_deletions(pending_only=pending_only)
+
+    def recover(self) -> list[str]:
+        """Resume pending physical cleanup and quarantine unrelated abandoned writes."""
+        return self.store.recover()
 
 
 def _pipeline(processors: Pipeline | Iterable[Processor]) -> Pipeline:
