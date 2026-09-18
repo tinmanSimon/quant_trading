@@ -1,6 +1,5 @@
-"""Small application service joining fetching, preflight and simulations."""
+"""Research preflight, simulations and saved runs."""
 
-from datetime import datetime
 from hashlib import sha256
 from importlib.metadata import version
 from pathlib import Path
@@ -10,7 +9,6 @@ import polars as pl
 from data_pipeline import DataPipeline
 
 from .backtesting import ExecutionSettings, run_backtest
-from .batch_fetch import fetch_many
 from .datasets import prepare_snapshot
 from .errors import PreflightError, ResearchError
 from .runs import ResearchRun, comparison_identity, list_runs, load_run, save_run
@@ -34,11 +32,6 @@ class Research:
         if self.strategies is None:
             self.strategies = load_registry()
         return self.strategies
-
-    def fetch_many(self, tickers, *, start: datetime, end: datetime, timeframe="1d",
-                   provider="yahoo", skip_missing_ohlc=None):
-        return fetch_many(self.pipeline, tickers=tickers, start=start, end=end, timeframe=timeframe,
-                          provider=provider, skip_missing_ohlc=skip_missing_ohlc)
 
     def _strategies(self, strategies):
         if isinstance(strategies, (str, bytes, dict)):

@@ -9,13 +9,15 @@ from unittest.mock import Mock
 import polars as pl
 import pytest
 
-from research import BatchFetchReport, DataIssue, FetchOutcome, PreflightError, PreflightReport
+from data_pipeline import BatchFetchReport, DataPipeline, FetchOutcome
+from research import DataIssue, PreflightError, PreflightReport, Research
 from research import cli
 
 
 @pytest.fixture
 def app(monkeypatch):
-    service = Mock()
+    service = Mock(spec=Research)
+    service.pipeline = Mock(spec=DataPipeline)
     factory = Mock(return_value=service)
     monkeypatch.setattr(cli, "Research", factory)
     return service, factory
@@ -63,14 +65,14 @@ def test_bad_arguments_exit_cleanly_without_storage(app, capsys, args, fragment)
 
 def test_fetch_reports_all_tickers_and_failure_exit_code(app, capsys, tmp_path):
     service, factory = app
-    service.fetch_many.return_value = BatchFetchReport((
+    service.pipeline.fetch_many.return_value = BatchFetchReport((
         FetchOutcome("AAPL", "saved", ("aapl-id",), 42),
         FetchOutcome("MSFT", "failed", error_type="ProviderError", error_message="upstream timed out"),
         FetchOutcome("NVDA", "saved", ("nvda-id",), 40),
     ))
     assert cli.main(fetch_args(tmp_path) + ["--skip-missing-ohlc"]) == 1
     factory.assert_called_once_with(str(tmp_path / "data"), str(tmp_path / "runs"))
-    service.fetch_many.assert_called_once_with(
+    service.pipeline.fetch_many.assert_called_once_with(
         tickers=["AAPL", "MSFT", "NVDA"], start=datetime(2025, 1, 1, tzinfo=UTC),
         end=datetime(2025, 2, 1, tzinfo=UTC), timeframe="1h", skip_missing_ohlc=True,
     )
@@ -82,21 +84,21 @@ def test_fetch_reports_all_tickers_and_failure_exit_code(app, capsys, tmp_path):
 
 def test_fetch_all_success_returns_zero_and_defaults_to_strict(app, capsys, tmp_path):
     service, _ = app
-    service.fetch_many.return_value = BatchFetchReport(tuple(
+    service.pipeline.fetch_many.return_value = BatchFetchReport(tuple(
         FetchOutcome(ticker, "saved", (ticker.lower(),), 7) for ticker in ["AAPL", "MSFT", "NVDA"]
     ))
     assert cli.main(fetch_args(tmp_path)) == 0
-    assert service.fetch_many.call_args.kwargs["skip_missing_ohlc"] is False
+    assert service.pipeline.fetch_many.call_args.kwargs["skip_missing_ohlc"] is False
     assert len(capsys.readouterr().out.splitlines()) == 3
 
 
 def test_explicit_offset_dates_are_normalized_to_utc(app, tmp_path):
     service, _ = app
-    service.fetch_many.return_value = BatchFetchReport((FetchOutcome("AAPL", "saved", ("id",), 1),))
+    service.pipeline.fetch_many.return_value = BatchFetchReport((FetchOutcome("AAPL", "saved", ("id",), 1),))
     assert cli.main(["--data-dir", str(tmp_path / "data"), "fetch", "--tickers", "AAPL",
                      "--start", "2025-01-02T09:30:00-05:00", "--end", "2025-01-02T16:00:00-05:00"]) == 0
-    assert service.fetch_many.call_args.kwargs["start"] == datetime(2025, 1, 2, 14, 30, tzinfo=UTC)
-    assert service.fetch_many.call_args.kwargs["end"] == datetime(2025, 1, 2, 21, tzinfo=UTC)
+    assert service.pipeline.fetch_many.call_args.kwargs["start"] == datetime(2025, 1, 2, 14, 30, tzinfo=UTC)
+    assert service.pipeline.fetch_many.call_args.kwargs["end"] == datetime(2025, 1, 2, 21, tzinfo=UTC)
 
 
 def test_backtest_preflight_abort_prints_all_problem_tickers(app, capsys, tmp_path):
@@ -111,7 +113,7 @@ def test_backtest_preflight_abort_prints_all_problem_tickers(app, capsys, tmp_pa
     assert "AAPL: Missing 1 required bar." in output
     assert "MSFT: No local data." in output
     assert "Saved run" not in output
-    service.fetch_many.assert_not_called()
+    service.pipeline.fetch_many.assert_not_called()
     assert not (tmp_path / "runs").exists()
 
 
@@ -136,7 +138,7 @@ def test_backtest_success_passes_specs_settings_and_prints_saved_path(app, capsy
     output = capsys.readouterr().out
     assert "Saved run: example-run" in output
     assert str(path) in output
-    service.fetch_many.assert_not_called()
+    service.pipeline.fetch_many.assert_not_called()
 
 
 @pytest.mark.parametrize("option", ["--initial-cash", "--commission-fixed", "--commission-bps", "--slippage-bps"])
@@ -177,5 +179,5 @@ def test_list_runs_prints_valid_json(app, capsys, tmp_path):
     service.list_runs.return_value = [{"run_id": "one"}, {"run_id": "two"}]
     assert cli.main(["--runs-dir", str(tmp_path / "runs"), "list-runs"]) == 0
     assert json.loads(capsys.readouterr().out) == [{"run_id": "one"}, {"run_id": "two"}]
-    service.fetch_many.assert_not_called()
+    service.pipeline.fetch_many.assert_not_called()
     service.backtest.assert_not_called()

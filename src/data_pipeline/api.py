@@ -1,11 +1,13 @@
 """Public orchestration of providers, raw storage, processors and local queries."""
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from collections.abc import Iterable, Sequence
 
 import polars as pl
 
+from .batch_fetch import BatchFetchReport, fetch_many
 from .exceptions import ProcessingError
 from .models import DataQuery, DataRequest
 from .processing import Pipeline, Processor
@@ -25,6 +27,12 @@ class DataPipeline:
     def __init__(self, data_dir: str | Path = "data", *, providers: ProviderRegistry | None = None):
         self.store = LocalDataStore(data_dir)
         self.providers = default_providers if providers is None else providers
+
+    def fetch_many(self, tickers, *, start: datetime, end: datetime, timeframe="1d",
+                   provider="yahoo", skip_missing_ohlc: bool | None = None) -> BatchFetchReport:
+        """Fetch and save every ticker independently, returning per-ticker outcomes."""
+        return fetch_many(self, tickers=tickers, start=start, end=end, timeframe=timeframe,
+                          provider=provider, skip_missing_ohlc=skip_missing_ohlc)
 
     def ingest(
         self, request: DataRequest, *, processors: Pipeline | Iterable[Processor] = (),

@@ -4,7 +4,8 @@ An OHLCV ingestion package with interchangeable providers, local raw/processed
 Parquet storage, ordered processors, revision history, and a Python/CLI query API.
 Yahoo Finance is the included vendor adapter.
 
-The `research` package adds batch fetching, strict local-data preflight,
+The `data_pipeline` package also handles batch fetching and per-ticker outcomes.
+The `research` package adds strict local-data preflight,
 independent-account backtests, versioned strategies and saved comparisons.
 A local Streamlit dashboard provides dataset navigation and interactive charts.
 
@@ -31,6 +32,35 @@ each wholly missing OHLC bar's UTC timestamp and reason alongside its immutable
 dataset revision; missing volume is never silently changed to zero. Existing
 overlapping data raises an error instead of being overwritten. Fetch requests
 still obey Yahoo's availability/retention limits.
+
+Batch fetching can also be used directly without creating a research service:
+
+```python
+from datetime import UTC, datetime
+from data_pipeline import DataPipeline
+
+pipeline = DataPipeline("data")
+report = pipeline.fetch_many(
+    ["AAPL", "MSFT"], timeframe="1d",
+    start=datetime(2024, 1, 1, tzinfo=UTC),
+    end=datetime(2025, 1, 1, tzinfo=UTC),
+    skip_missing_ohlc=True,
+)
+print(report.to_frame())
+```
+
+`BatchFetchReport`, `FetchOutcome`, and the standalone `fetch_many(pipeline, ...)`
+function now live in `data_pipeline`. Omitting the Python `skip_missing_ohlc`
+option preserves the pipeline's registered provider configuration; an explicit
+boolean uses a Yahoo provider configured just for that batch. Each successful
+ticker is saved independently, even if another fails. Call
+`pipeline.fetch_many(...)` (or `research.pipeline.fetch_many(...)` when using a
+research service), and import reports directly from `data_pipeline`.
+Invalid batch options raise `InvalidDataRequestError`.
+The dashboard and `quant-research fetch` use the pipeline API directly.
+As with other research source changes, this refactor changes the code fingerprint
+recorded in new backtests. Existing runs remain readable; comparisons still
+require matching fingerprints.
 
 Run the three example strategies independently against every ticker:
 
@@ -251,10 +281,10 @@ changes, not adversarial rewriting of both a file and its checksum.
 
 ```text
 src/
-├── data_pipeline/         # Providers, canonical values, quality and storage
+├── data_pipeline/         # Providers, batch acquisition, quality and storage
+│   └── batch_fetch.py    # Per-ticker fetch logic and reports
 ├── research/
 │   ├── api.py            # Research application interface
-│   ├── batch_fetch.py    # Per-ticker fetch outcomes
 │   ├── datasets.py       # All-ticker checks and pinned revision snapshots
 │   ├── instruments.py    # Explicit exchange calendars and bar intervals
 │   ├── strategies/      # Versioned strategies and weighted combinations
@@ -367,6 +397,7 @@ case normalization even when the provider filter is omitted.
 ```text
 src/data_pipeline/
 ├── api.py                 # DataPipeline orchestrates the complete workflow
+├── batch_fetch.py         # Independent ticker fetches and structured outcomes
 ├── cli.py, __main__.py     # Command-line entry points
 ├── models.py              # DataRequest and DataQuery
 ├── exceptions.py          # Specific validation/provider/storage errors

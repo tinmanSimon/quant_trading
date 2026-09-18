@@ -59,7 +59,7 @@ def main(argv=None):
             return 0
         query = dict(tickers=args.tickers, start=args.start, end=args.end, timeframe=args.timeframe)
         if args.command == "fetch":
-            report = app.fetch_many(**query, skip_missing_ohlc=args.skip_missing_ohlc)
+            report = app.pipeline.fetch_many(**query, skip_missing_ohlc=args.skip_missing_ohlc)
             for outcome in report.outcomes:
                 if outcome.status == "failed":
                     print(f"{outcome.ticker}: FAILED ({outcome.error_type}): {outcome.error_message}")

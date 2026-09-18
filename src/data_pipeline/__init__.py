@@ -16,6 +16,7 @@ from .exceptions import (
     StorageWriteError,
 )
 from .models import DataQuery, DataRequest
+from .batch_fetch import BatchFetchReport, FetchOutcome, fetch_many
 from .schemas import CANONICAL_OHLCV_COLUMNS, OHLCV_SCHEMA, validate_ohlcv
 from .storage import (
     DeletionCleanupError, DeletionPlan, DeletionPlanStaleError, DeletionReport,
@@ -32,6 +33,9 @@ __all__ = [
     "DataRequest",
     "DataQuery",
     "DataPipeline",
+    "BatchFetchReport",
+    "FetchOutcome",
+    "fetch_many",
     "IngestionResult",
     "FetchQuality",
     "FetchResult",

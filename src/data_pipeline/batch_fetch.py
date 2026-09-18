@@ -1,14 +1,19 @@
 """Sequential independent fetch attempts with structured outcomes."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 import json
+from typing import TYPE_CHECKING
 
 import polars as pl
 
-from data_pipeline import DataPipeline, DataRequest
-from data_pipeline.providers import ProviderRegistry, YFinanceProvider
+from .exceptions import InvalidDataRequestError
+from .models import DataRequest
+from .providers import ProviderRegistry, YFinanceProvider
 
-from .errors import ResearchError
+if TYPE_CHECKING:
+    from .api import DataPipeline
 
 
 @dataclass(frozen=True)
@@ -44,14 +49,23 @@ class BatchFetchReport:
 
 def fetch_many(pipeline: DataPipeline, *, tickers, start, end, timeframe="1d",
                provider="yahoo", skip_missing_ohlc: bool | None = None) -> BatchFetchReport:
+    """Save each ticker independently, recording ordinary failures and quality.
+
+    ``None`` preserves the pipeline's registered provider configuration. An
+    explicit Yahoo skip setting uses a separate provider for this batch only.
+    Interrupts and SystemExit propagate instead of becoming ticker failures.
+    """
     if isinstance(tickers, (str, bytes)):
-        raise ResearchError("Supply a list of ticker symbols.")
+        raise InvalidDataRequestError("Supply a list of ticker symbols.")
     tickers = tuple(tickers)
     if not tickers:
-        raise ResearchError("Supply at least one ticker.")
+        raise InvalidDataRequestError("Supply at least one ticker.")
     if skip_missing_ohlc is not None:
         if provider.strip().lower() != "yahoo":
-            raise ResearchError("skip_missing_ohlc is a Yahoo-specific setting.")
+            raise InvalidDataRequestError("skip_missing_ohlc is a Yahoo-specific setting.")
+        # Import at call time: the public DataPipeline API delegates here.
+        from .api import DataPipeline
+
         pipeline = DataPipeline(pipeline.store.data_dir, providers=ProviderRegistry({
             "yahoo": YFinanceProvider(skip_missing_ohlc=skip_missing_ohlc),
         }))

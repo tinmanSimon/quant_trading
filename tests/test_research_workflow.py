@@ -52,7 +52,7 @@ def test_batch_failure_continues_and_reports_each_ticker(tmp_path):
 
     provider = Provider()
     app = Research(tmp_path / "data", tmp_path / "runs", providers=ProviderRegistry({"yahoo": provider}))
-    report = app.fetch_many(["AAPL", "BAD", "MSFT"], start=date(2), end=date(10))
+    report = app.pipeline.fetch_many(["AAPL", "BAD", "MSFT"], start=date(2), end=date(10))
     assert provider.calls == ["AAPL", "BAD", "MSFT"]
     assert [item.status for item in report.outcomes] == ["saved", "failed", "saved"]
     assert report.outcomes[1].error_message == "synthetic provider error"
@@ -67,7 +67,7 @@ def test_invalid_ticker_does_not_stop_following_fetches(tmp_path):
             return frame(request.symbol)
 
     app = Research(tmp_path / "data", tmp_path / "runs", providers=ProviderRegistry({"yahoo": Provider()}))
-    report = app.fetch_many(["", "AAPL"], start=date(2), end=date(10))
+    report = app.pipeline.fetch_many(["", "AAPL"], start=date(2), end=date(10))
     assert [item.status for item in report.outcomes] == ["failed", "saved"]
 
 
@@ -78,7 +78,7 @@ def test_interrupt_does_not_get_swallowed(tmp_path):
 
     app = Research(tmp_path / "data", tmp_path / "runs", providers=ProviderRegistry({"yahoo": Provider()}))
     with pytest.raises(KeyboardInterrupt):
-        app.fetch_many(["AAPL", "MSFT"], start=date(2), end=date(10))
+        app.pipeline.fetch_many(["AAPL", "MSFT"], start=date(2), end=date(10))
 
 
 def test_missing_second_ticker_aborts_before_any_strategy_call(app):

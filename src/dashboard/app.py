@@ -162,8 +162,8 @@ def _fetch_page(research: Research):
             st.error("Provide at least one ticker and an end after the start.")
             return
         with st.spinner("Fetching and verifying each ticker…"):
-            report = research.fetch_many(_tickers(tickers), provider="yahoo", timeframe=timeframe,
-                                         start=start, end=end, skip_missing_ohlc=skip)
+            report = research.pipeline.fetch_many(_tickers(tickers), provider="yahoo", timeframe=timeframe,
+                                                  start=start, end=end, skip_missing_ohlc=skip)
         st.session_state["fetch-report"] = report
     report = st.session_state.get("fetch-report")
     if report is not None:
