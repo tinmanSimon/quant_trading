@@ -160,7 +160,7 @@ def list_runs(root: Path) -> list[dict]:
 
 def comparison_identity(manifest: dict) -> dict:
     """Compare only identical market revisions, intervals and account rules."""
-    keys = ("tickers", "provider", "timeframe", "layer", "pipeline_id", "start", "end",
+    keys = ("tickers", "provider", "timeframe", "layer", "start", "end",
             "instruments", "calendar_version", "price_basis", "return_basis", "account_mode",
             "execution_settings", "engine_sha256")
     result = {key: manifest[key] for key in keys}

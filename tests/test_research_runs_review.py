@@ -30,7 +30,7 @@ def result():
 
 def manifest():
     return {
-        "tickers": ["AAPL"], "provider": "yahoo", "timeframe": "1h", "layer": "raw", "pipeline_id": None,
+        "tickers": ["AAPL"], "provider": "yahoo", "timeframe": "1h", "layer": "raw",
         "start": "2025-01-02T16:30:00+00:00", "end": "2025-01-02T18:30:00+00:00",
         "instruments": {"AAPL": {"calendar": "XNYS", "currency": "USD"}},
         "calendar_version": "test", "price_basis": "vendor_unadjusted", "return_basis": "price_return_no_dividend_credit",
@@ -73,6 +73,21 @@ def test_corrupted_manifest_is_not_loaded(tmp_path):
     path.write_text(path.read_text() + " ", encoding="utf-8")
     with pytest.raises(ResearchError, match="checksum"):
         load_run(tmp_path, saved.run_id)
+
+
+def test_legacy_null_pipeline_field_does_not_break_loading_or_comparison(tmp_path):
+    root = tmp_path / "runs"
+    original = result()
+    current = manifest()
+    legacy = dict(current, pipeline_id=None)
+    old_run = save_run(root, [original], legacy)
+    new_run = save_run(root, [original], current)
+    restored = load_run(root, old_run.run_id)
+    assert restored.manifest["pipeline_id"] is None
+    assert "pipeline_id" not in new_run.manifest
+    assert comparison_identity(restored.manifest) == comparison_identity(new_run.manifest)
+    research = Research(tmp_path / "data", root)
+    assert research.compare_runs([old_run.run_id, new_run.run_id]).height == 2
 
 
 def test_artifact_traversal_rejected_even_with_updated_manifest_hash(tmp_path):

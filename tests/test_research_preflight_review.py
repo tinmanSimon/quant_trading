@@ -75,6 +75,8 @@ def test_unknown_quality_is_explicit_but_complete_actual_data_can_pass(tmp_path)
     assert any("unknown" in note for note in snapshot.report.notes)
     assert snapshot.frames["AAPL"].height == len(bars)
     assert snapshot.manifest["sources"]["AAPL"][0]["quality"]["status"] == "unknown"
+    assert snapshot.manifest["layer"] == "raw"
+    assert "pipeline_id" not in snapshot.manifest
 
 
 def test_interval_ending_inside_final_bar_fails_before_simulation(tmp_path):
@@ -105,7 +107,7 @@ def test_unverified_processed_history_is_rejected_before_data_selection(tmp_path
     with pytest.raises(ResearchError, match="causality"):
         prepare_snapshot(pipeline, tickers=["AAPL"], start=stamp(2025, 7, 3),
                          end=stamp(2025, 7, 4), timeframe="1h", lookback=1,
-                         layer="processed", pipeline_id="future-dependent-processor")
+                         layer="processed")
     assert not pipeline.store.catalog_path.exists()
 
 
