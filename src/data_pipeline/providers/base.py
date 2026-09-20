@@ -21,6 +21,8 @@ class BaseDataProvider(ABC):
     """
 
     name: str = "base"
+    # Declare fetch intervals so clients can offer valid choices without guessing.
+    supported_timeframes: frozenset[str] = frozenset()
 
     @abstractmethod
     def fetch(self, request: DataRequest) -> pl.DataFrame:

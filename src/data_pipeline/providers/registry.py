@@ -35,6 +35,10 @@ class ProviderRegistry:
             raise ValueError(f"Provider {key!r} is already registered.")
         self._providers[key] = provider
 
+    def names(self) -> tuple[str, ...]:
+        """List registered names without constructing providers or contacting vendors."""
+        return tuple(sorted(self._providers))
+
     def get(self, name: str) -> BaseDataProvider:
         key = _provider_key(name)
         try:

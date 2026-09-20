@@ -181,3 +181,28 @@ def test_list_runs_prints_valid_json(app, capsys, tmp_path):
     assert json.loads(capsys.readouterr().out) == [{"run_id": "one"}, {"run_id": "two"}]
     service.pipeline.fetch_many.assert_not_called()
     service.backtest.assert_not_called()
+
+
+@pytest.mark.parametrize("interval", ["1m", "2m", "5m", "15m", "1h", "90m", "1d", "60m"])
+def test_fetch_accepts_exact_workflow_intervals_and_normalizes_alias(app, tmp_path, interval):
+    service, _ = app
+    service.pipeline.fetch_many.return_value = BatchFetchReport((FetchOutcome("AAPL", "saved"),))
+    assert cli.main(fetch_args(tmp_path) + ["--timeframe", interval]) == 0
+    assert service.pipeline.fetch_many.call_args.kwargs["timeframe"] == ("1h" if interval == "60m" else interval)
+
+
+@pytest.mark.parametrize("interval", ["1m", "2m", "5m", "15m", "30m", "1h", "90m", "1d", "60m"])
+def test_backtest_accepts_exact_workflow_intervals(app, tmp_path, interval):
+    service, _ = app
+    service.backtest.return_value = SimpleNamespace(comparison="ok", run_id="example", path=tmp_path)
+    assert cli.main(backtest_args(tmp_path) + ["--timeframe", interval]) == 0
+    assert service.backtest.call_args.kwargs["timeframe"] == ("1h" if interval == "60m" else interval)
+    service.pipeline.fetch_many.assert_not_called()
+
+
+def test_yahoo_fetch_rejects_thirty_minutes_without_initializing_service(app, tmp_path):
+    _, factory = app
+    with pytest.raises(SystemExit) as error:
+        cli.main(fetch_args(tmp_path) + ["--timeframe", "30m"])
+    assert error.value.code == 2
+    factory.assert_not_called()

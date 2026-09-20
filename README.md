@@ -73,7 +73,7 @@ quant-research list-runs
 
 All dates have an inclusive start and exclusive end. The fetch begins earlier
 than the backtest because strategies need preceding warm-up history. These are
-example historical daily ranges; choose recent ranges for Yahoo hourly data.
+example historical daily ranges; choose recent ranges for Yahoo intraday data.
 `python -m research` also works in place of `quant-research`.
 
 Launch the dashboard from the repository root:
@@ -113,6 +113,57 @@ print(run.comparison)
 restored = research.load_run(run.run_id)
 ```
 
+### Fetch, store and backtest the same interval
+
+The Yahoo workflow supports `1m`, `2m`, `5m`, `15m`, `1h`, `90m` and `1d`.
+Use the same interval when fetching and backtesting: AAPL `1m`, `15m`, `1h`
+and `1d` are separate local series. `60m` is normalized to `1h` everywhere,
+including CLI arguments; it cannot bypass overlap protection.
+
+The dashboard uses provider dropdowns, with no free-text provider names.
+**Fetch** lists registered providers and offers their declared intervals supported
+by the dashboard. **Market data** and **Backtest** list providers present in the
+local catalog, so stored data remains usable even if its adapter is no longer
+registered. Each view or backtest uses one provider; histories are never combined
+across providers. Yahoo’s missing-OHLC option appears only for Yahoo. New adapters
+should declare `supported_timeframes` and be registered before launching the dashboard.
+
+In the dashboard, select **Fetch**, choose a provider, bar size and UTC bounds, and save
+the data. Then select **Backtest**, choose the same bar size, tickers and
+strategies, and set the test bounds. Intraday forms include UTC time inputs;
+the end is exclusive. The backtest page shows which tickers have local data
+at that interval, and preflight checks their actual coverage before execution.
+The CLI follows the same flow:
+
+```bash
+# Set these to recent UTC timestamps covering complete sessions for your test.
+quant-research fetch --tickers AAPL MSFT --timeframe 15m \
+  --start "$FETCH_START" --end "$END"
+quant-research backtest --tickers AAPL MSFT --timeframe 15m \
+  --start "$TEST_START" --end "$END" --strategies strategies.example.json
+```
+
+Choose `FETCH_START` earlier than `TEST_START` to include strategy warm-up.
+Lookbacks count bars, not days: 20 preceding observations span different
+amounts of time at `1m` and `1d`. Calendar generation walks backward through
+trading sessions until enough warm-up bars are available. Local data must
+contain those bars as well. Yahoo's retention and availability restrictions
+still apply; provider failures are reported per ticker.
+
+Intraday bars start at the session open and advance by the selected duration.
+The final bar is clipped to the actual session close, including early closes.
+For a 09:30–13:00 session, hourly labels are 09:30, 10:30, 11:30 and 12:30;
+the last bar closes at 13:00. Off-grid provider timestamps cause preflight to
+fail. No interval is silently substituted, resampled, filled, or relabeled.
+An interval end or `as_of` cutoff inside an expected bar blocks the test.
+
+`30m` raw data can be backtested through the same API, but our Yahoo adapter
+intentionally rejects fetching it because yfinance resamples that interval.
+Supply genuine raw `30m` bars from a compatible provider instead. Weekly and
+monthly backtesting, lunch-break calendars, automatic session resets and
+mandatory session-end liquidation are outside this implementation. Positions
+may continue into the next session under the existing execution rules.
+
 ### Data checks and simulation rules
 
 Before any strategy is evaluated, every ticker must have every required bar,
@@ -121,11 +172,11 @@ timestamps, holidays, DST, early closes, session alignment, completed bars,
 file checksums and canonical values. Missing, unexpected, corrupt or unfinished
 bars abort the entire request with ticker-specific details. Bounds in the
 catalog alone do not establish completeness. Backtests never fetch or fabricate
-missing data. The initial supported inputs are raw `1h` and `1d` bars for USD
-instruments, using the explicitly selected calendar (default `XNYS`, U.S.
+missing data. Supported inputs are raw `1m`, `2m`, `5m`, `15m`, `30m`, `1h`,
+`90m` and `1d` bars for USD instruments, using the explicitly selected calendar (default `XNYS`, U.S.
 regular equity sessions). The calendar is a user-selected assumption, not
 automatic exchange discovery; choose the appropriate calendar for the symbol.
-Hourly calendars with lunch breaks are rejected.
+Intraday calendars with lunch breaks are rejected.
 
 A skipped bar blocks a test when its absence affects the test or warm-up window.
 Omissions outside that window do not block it. Legacy datasets have `unknown`
@@ -287,6 +338,7 @@ src/
 │   ├── api.py            # Research application interface
 │   ├── datasets.py       # All-ticker checks and pinned revision snapshots
 │   ├── instruments.py    # Explicit exchange calendars and bar intervals
+│   ├── timeframes.py     # Shared interval durations and workflow choices
 │   ├── strategies/      # Versioned strategies and weighted combinations
 │   ├── backtesting/     # Causal execution, cash accounting and metrics
 │   ├── runs.py           # Atomic saved runs and compatible comparisons

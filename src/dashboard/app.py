@@ -12,22 +12,41 @@ from dashboard.deletion import deletion_page
 from dashboard.strategy_controls import strategy_specs
 from research import PreflightError, Research, ResearchError
 from research.backtesting import ExecutionSettings
+from research.timeframes import BACKTEST_TIMEFRAMES, INTRADAY_DURATIONS, fetch_timeframes
 
 
 def _utc_date(value: date) -> datetime:
     return datetime.combine(value, time.min, tzinfo=UTC)
 
 
-def _tickers(text: str) -> list[str]:
-    return list(dict.fromkeys(item.upper() for item in text.replace(",", " ").split()))
+def _tickers(text: str, provider: str = "yahoo") -> list[str]:
+    items = text.replace(",", " ").split()
+    return list(dict.fromkeys(item.upper() if provider == "yahoo" else item for item in items))
 
 
-def _date_fields(prefix: str, *, first: date | None = None, last: date | None = None):
+def _provider_choice(names, *, key, result_key=None):
+    names = sorted(set(names))
+    if not names:
+        st.info("No providers are available here. Fetching requires a registered provider; browsing and backtesting require local datasets.")
+        return None
+    provider = st.selectbox("Provider", names, key=key)
+    if result_key and st.session_state.get(f"{key}-previous") != provider:
+        st.session_state.pop(result_key, None)
+    st.session_state[f"{key}-previous"] = provider
+    return provider
+
+
+def _date_fields(prefix: str, *, first: date | None = None, last: date | None = None,
+                 intraday: bool = False):
     left, right = st.columns(2)
     first = first or date.today() - timedelta(days=30)
     last = last or date.today()
     start = left.date_input("Start date (UTC, inclusive)", first, key=f"{prefix}-start")
     end = right.date_input("End date (UTC, exclusive)", last, key=f"{prefix}-end")
+    if intraday:
+        start_time = left.time_input("Start time (UTC)", time.min, step=60, key=f"{prefix}-start-time")
+        end_time = right.time_input("End time (UTC)", time.min, step=60, key=f"{prefix}-end-time")
+        return datetime.combine(start, start_time, UTC), datetime.combine(end, end_time, UTC)
     return _utc_date(start), _utc_date(end)
 
 
@@ -84,6 +103,8 @@ def _data_page(research: Research):
     if not items:
         st.info("No matching local datasets. Open Fetch to download your first batch.")
         return
+    provider = _provider_choice((item.request.provider for item in items), key="browse-provider")
+    items = [item for item in items if item.request.provider == provider]
     search = st.text_input("Find a ticker", placeholder="AAPL")
     symbols = sorted({item.request.symbol for item in items if search.upper() in item.request.symbol.upper()})
     if not symbols:
@@ -119,8 +140,8 @@ def _data_page(research: Research):
         return
     st.caption("Drag to zoom, scroll to zoom, or use the range slider. Double-click to reset. "
                "Daily and longer bars retain their session-date labels in every timezone.")
-    if identity[1] == "1h":
-        st.caption("Each candle is labeled by its start. The final bar of a trading session may be shorter than one hour.")
+    if identity[1] in INTRADAY_DURATIONS:
+        st.caption("Each candle is labeled by its start. The final bar of a trading session may be shorter than the selected interval.")
     if mode == "One exact revision":
         frame = research.pipeline.read_dataset(selected[0].dataset_id).filter(
             (pl.col("timestamp") >= start) & (pl.col("timestamp") < end))
@@ -150,19 +171,29 @@ def _data_page(research: Research):
 def _fetch_page(research: Research):
     st.title("Fetch market data")
     st.caption("Each ticker is attempted independently; a failure does not stop the remaining downloads.")
+    provider = _provider_choice(research.pipeline.providers.names(), key="fetch-provider", result_key="fetch-report")
+    if provider is None:
+        return
+    adapter = research.pipeline.providers.get(provider)
+    intervals = fetch_timeframes(adapter.supported_timeframes)
+    if not intervals:
+        st.warning("This provider declares no fetch intervals supported by the dashboard.")
+        return
+    timeframe = st.selectbox("Bar size", intervals, key="fetch-timeframe")
     with st.form("fetch-data"):
         tickers = st.text_area("Tickers (commas, spaces, or new lines)", "AAPL, MSFT")
-        timeframe = st.selectbox("Bar size", ["1d", "1h", "1m", "5m", "15m"], key="fetch-timeframe")
-        start, end = _date_fields("fetch")
-        skip = st.checkbox("Skip bars where every OHLC price is missing", value=False)
-        st.caption("Skipped timestamps and reasons are recorded. Other invalid values still fail validation.")
+        start, end = _date_fields("fetch", intraday=timeframe in INTRADAY_DURATIONS)
+        skip = None
+        if provider == "yahoo":
+            skip = st.checkbox("Skip bars where every OHLC price is missing", value=False)
+            st.caption("Skipped timestamps and reasons are recorded. Other invalid values still fail validation.")
         submitted = st.form_submit_button("Fetch and save", type="primary")
     if submitted:
-        if not _tickers(tickers) or start >= end:
+        if not _tickers(tickers, provider) or start >= end:
             st.error("Provide at least one ticker and an end after the start.")
             return
         with st.spinner("Fetching and verifying each ticker…"):
-            report = research.pipeline.fetch_many(_tickers(tickers), provider="yahoo", timeframe=timeframe,
+            report = research.pipeline.fetch_many(_tickers(tickers, provider), provider=provider, timeframe=timeframe,
                                                   start=start, end=end, skip_missing_ohlc=skip)
         st.session_state["fetch-report"] = report
     report = st.session_state.get("fetch-report")
@@ -214,14 +245,24 @@ def _backtest_page(research: Research):
     st.title("Backtest strategies")
     st.caption("All selected tickers must pass local-data and warm-up checks before any strategy runs. "
                "Orders use the next bar's open; this screen never fetches missing data.")
-    local = research.pipeline.list_datasets(DataQuery(layer="raw", provider="yahoo"))
+    # Discover strategies on this page even when the store has no raw data yet.
+    registry = research.strategy_registry
+    local = research.pipeline.list_datasets(DataQuery(layer="raw"))
+    provider = _provider_choice((item.request.provider for item in local),
+                                key="backtest-provider", result_key="backtest-run")
+    if provider is None:
+        return
+    local = [item for item in local if item.request.provider == provider]
     symbols = sorted({item.request.symbol for item in local})
     tickers = st.multiselect("Local tickers", symbols, default=symbols[:1])
     extra = st.text_input("Additional required tickers", help="A missing ticker will be reported by preflight and abort the run.")
-    timeframe = st.selectbox("Bar size", ["1d", "1h"], key="backtest-timeframe")
-    start, end = _date_fields("backtest")
-    specs = strategy_specs(research.strategy_registry)
-    st.caption("Strategies declare their warm-up requirements. Download history before the test start; "
+    timeframe = st.selectbox("Bar size", BACKTEST_TIMEFRAMES, key="backtest-timeframe")
+    start, end = _date_fields("backtest", intraday=timeframe in INTRADAY_DURATIONS)
+    available = sorted({item.request.symbol for item in local if item.request.timeframe == timeframe})
+    st.caption(f"Local {timeframe} data: {', '.join(available) if available else 'none'}. "
+               "Preflight requires this exact interval, including warm-up; other intervals are not substituted.")
+    specs = strategy_specs(registry)
+    st.caption("Strategy lookbacks count bars at the selected interval. Download history before the test start; "
                "preflight checks the longest selected requirement for every ticker.")
     st.caption("After changing private strategy Python files, restart the dashboard to load the new code.")
     st.caption("Calendar: U.S. regular equity sessions (XNYS), including holidays and early closes.")
@@ -235,7 +276,7 @@ def _backtest_page(research: Research):
     submitted = st.button("Validate all data and run", type="primary", disabled=specs is None)
     if submitted:
         st.session_state.pop("backtest-run", None)
-        chosen = list(dict.fromkeys(tickers + _tickers(extra)))
+        chosen = list(dict.fromkeys(tickers + _tickers(extra, provider)))
         if not chosen or not specs or start >= end:
             st.error("Choose tickers, at least one strategy, and a valid date range.")
             return
@@ -244,7 +285,7 @@ def _backtest_page(research: Research):
         try:
             with st.spinner("Checking all datasets, then running strategies…"):
                 run = research.backtest(chosen, strategies=specs, start=start, end=end,
-                                        timeframe=timeframe, settings=settings, calendar="XNYS")
+                                        timeframe=timeframe, provider=provider, settings=settings, calendar="XNYS")
             st.session_state["backtest-run"] = run
         except PreflightError as error:
             st.session_state.pop("backtest-run", None)

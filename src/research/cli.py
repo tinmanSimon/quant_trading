@@ -6,9 +6,20 @@ from decimal import Decimal, InvalidOperation
 import json
 from pathlib import Path
 
+from data_pipeline import DataPipelineError
+from data_pipeline.providers import YFinanceProvider
+
 from .api import Research
 from .backtesting import ExecutionSettings
 from .errors import PreflightError
+from .timeframes import BACKTEST_TIMEFRAMES, fetch_timeframes, normalize_timeframe
+
+
+def _timeframe(value):
+    try:
+        return normalize_timeframe(value)
+    except DataPipelineError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
 
 
 def _date(value):
@@ -39,7 +50,8 @@ def main(argv=None):
         sub.add_argument("--tickers", nargs="+", required=True)
         sub.add_argument("--start", type=_date, required=True)
         sub.add_argument("--end", type=_date, required=True)
-        sub.add_argument("--timeframe", choices=("1h", "1d"), default="1d")
+        choices = fetch_timeframes(YFinanceProvider.supported_timeframes) if name == "fetch" else BACKTEST_TIMEFRAMES
+        sub.add_argument("--timeframe", type=_timeframe, choices=choices, default="1d")
         if name == "fetch":
             sub.add_argument("--skip-missing-ohlc", action="store_true")
         else:
