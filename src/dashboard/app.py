@@ -183,6 +183,15 @@ def _fetch_page(research: Research):
     with st.form("fetch-data"):
         tickers = st.text_area("Tickers (commas, spaces, or new lines)", "AAPL, MSFT")
         start, end = _date_fields("fetch", intraday=timeframe in INTRADAY_DURATIONS)
+        fetch_options = {}
+        if provider == "massive":
+            fetch_options["massive_request_interval_seconds"] = st.number_input(
+                "Minimum seconds between API requests", min_value=0.0, value=0.0, step=1.0,
+                key="fetch-massive-request-interval",
+            )
+            st.caption("Massive only: its free plan allows 5 requests per minute. About 13 seconds "
+                       "helps stay within that limit when no other downloads share your API key. "
+                       "0 disables deliberate pacing.")
         skip = None
         if provider == "yahoo":
             skip = st.checkbox("Skip bars where every OHLC price is missing", value=False)
@@ -194,7 +203,7 @@ def _fetch_page(research: Research):
             return
         with st.spinner("Fetching and verifying each ticker…"):
             report = research.pipeline.fetch_many(_tickers(tickers, provider), provider=provider, timeframe=timeframe,
-                                                  start=start, end=end, skip_missing_ohlc=skip)
+                                                  start=start, end=end, skip_missing_ohlc=skip, **fetch_options)
         st.session_state["fetch-report"] = report
     report = st.session_state.get("fetch-report")
     if report is not None:

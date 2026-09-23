@@ -467,6 +467,7 @@ report = pipeline.fetch_many(
     ["AAPL", "MSFT"], provider="massive", timeframe="15m",
     start=datetime(2024, 1, 2, tzinfo=UTC),
     end=datetime(2024, 1, 6, tzinfo=UTC),
+    massive_request_interval_seconds=13,
 )
 print(report.to_frame())
 bars = pipeline.read(DataQuery(provider="massive", symbol="AAPL", timeframe="15m"))
@@ -477,12 +478,25 @@ symbols, including the historical ticker when requesting covered delisted
 stocks. This adapter does not build historical stock universes or add delisting
 accounting to the simulator. Do not pass Yahoo's `skip_missing_ohlc` option.
 
-`MassiveProvider(api_key=None, timeout=10, max_retries=2)` also accepts an
+The dashboard offers **Minimum seconds between API requests** for Massive only.
+The free plan permits 5 requests per minute; about 13 seconds helps stay below
+that limit when no other downloads share the key. The interval applies to every
+HTTP request, including chunks, pagination, retries and later tickers in the
+same batch. The first request starts immediately. An explicit
+`massive_request_interval_seconds` applies only to that batch and preserves the
+registered provider's other settings. Omit it to retain the registered interval;
+the default is `0`, which disables deliberate pacing but still honors retry
+waits. Separate batches and processes are paced independently.
+
+`MassiveProvider(api_key=None, timeout=10, max_retries=2, request_interval_seconds=0)` also accepts an
 explicit key for a custom registry. Its native intervals are `1m`, `2m`, `5m`,
 `15m`, `30m`, `1h`, `90m` and `1d`; `60m` requests normalize to `1h`.
 Requests explicitly use unadjusted prices, download every page, and split long
-ranges below the base-bar limit. Connection failures, HTTP 429 and selected
-temporary server errors receive bounded retries. HTTP 401 indicates invalid
+intraday ranges into 30-calendar-day chunks below the 50,000 base-bar limit.
+Connection failures, HTTP 429 and selected temporary server errors receive
+bounded retries. A 429 without a usable `Retry-After` waits 60 seconds before
+retrying; a server-requested delay above 60 seconds fails the current fetch.
+HTTP 401 indicates invalid
 credentials; HTTP 403 can indicate subscription/history restrictions. A failed
 download saves nothing for that ticker, while later tickers are still attempted.
 

@@ -134,6 +134,12 @@ def test_massive_is_discovered_without_credentials_or_network(tmp_path, monkeypa
         '1m', '2m', '5m', '15m', '30m', '1h', '90m', '1d',
     }
     assert not app.checkbox  # The missing-OHLC option belongs to Yahoo only.
+    assert app.number_input(key='fetch-massive-request-interval').value == 0.0
+    assert any('Massive only' in caption.value and '13 seconds' in caption.value
+               for caption in app.caption)
+    app.selectbox(key='fetch-provider').set_value('yahoo').run()
+    assert not any(field.key == 'fetch-massive-request-interval' for field in app.number_input)
+    assert not any('Massive only' in caption.value for caption in app.caption)
 
 
 def test_massive_dashboard_fetch_and_browse_keep_vendor_data_separate(tmp_path, monkeypatch):
@@ -150,7 +156,7 @@ def test_massive_dashboard_fetch_and_browse_keep_vendor_data_separate(tmp_path, 
         pl.col('timestamp').cast(pl.Datetime('ms', 'UTC')))
 
     def fetch_result(self, request):
-        calls.append(request)
+        calls.append((request, self.request_interval_seconds))
         return FetchResult(source, FetchQuality(status='reported'))
 
     monkeypatch.setattr(MassiveProvider, 'fetch_result', fetch_result)
@@ -158,12 +164,16 @@ def test_massive_dashboard_fetch_and_browse_keep_vendor_data_separate(tmp_path, 
     app.sidebar.radio[0].set_value('Fetch').run()
     app.selectbox(key='fetch-provider').set_value('massive').run()
     app.selectbox(key='fetch-timeframe').set_value('1d').run()
+    app.number_input(key='fetch-massive-request-interval').set_value(13.0)
     app.text_area[0].set_value('AAPL')
     app.date_input(key='fetch-start').set_value(start.date())
     app.date_input(key='fetch-end').set_value(end.date())
     next(b for b in app.button if b.label == 'Fetch and save').click().run()
     assert not app.exception and not app.error
-    assert [(r.provider, r.symbol, r.timeframe) for r in calls] == [('massive', 'AAPL', '1d')]
+    assert [(r.provider, r.symbol, r.timeframe, interval) for r, interval in calls] == [
+        ('massive', 'AAPL', '1d', 13.0),
+    ]
+    assert research.pipeline.providers.get('massive').request_interval_seconds == 0.0
     report = app.session_state['fetch-report']
     assert report.ok
     massive_id = report.outcomes[0].dataset_ids[0]

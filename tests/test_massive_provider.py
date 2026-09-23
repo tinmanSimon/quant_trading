@@ -295,7 +295,8 @@ def test_pagination_can_advance_start_but_cannot_change_semantics_or_leak_query_
 
 
 @pytest.mark.parametrize("timeframe,start,end,maximum_days", [
-    ("15m", datetime(2025, 2, 20, tzinfo=UTC), datetime(2025, 4, 2, tzinfo=UTC), 14),
+    ("15m", datetime(2025, 2, 20, tzinfo=UTC), datetime(2025, 4, 2, tzinfo=UTC), 30),
+    ("1h", datetime(2025, 10, 20, tzinfo=UTC), datetime(2025, 12, 2, tzinfo=UTC), 30),
     ("1d", datetime(2023, 1, 1, tzinfo=UTC), datetime(2025, 3, 12, tzinfo=UTC), 365),
 ])
 def test_long_requests_use_bounded_contiguous_chunks(http, request_data, timeframe, start, end, maximum_days):
@@ -306,7 +307,7 @@ def test_long_requests_use_bounded_contiguous_chunks(http, request_data, timefra
         # Stay on a native minute boundary, or local midnight for daily bars.
         stamp = datetime.fromtimestamp(lower / 1000, UTC)
         if timeframe != "1d":
-            stamp += timedelta(hours=13)
+            stamp = max(stamp + timedelta(hours=13), start)
         produced.append(stamp)
         return payload([bar(stamp)])
 
@@ -318,6 +319,11 @@ def test_long_requests_use_bounded_contiguous_chunks(http, request_data, timefra
     for lower, upper in ranges:
         # A daylight-saving transition can add an hour to a calendar-day chunk.
         assert upper - lower + 1 <= (maximum_days * 24 + 1) * 3600 * 1000
+        if timeframe != "1d":
+            assert (upper - lower + 1) / 60000 < 50000
+    # Long intraday fetches really use the larger window, including DST.
+    if timeframe != "1d":
+        assert ranges[0][1] - ranges[0][0] + 1 >= (30 * 24 - 1) * 3600 * 1000
     assert all(before[1] + 1 == after[0] for before, after in zip(ranges, ranges[1:]))
     assert result.height > 1
     assert all(start <= stamp < end for stamp in result["timestamp"])

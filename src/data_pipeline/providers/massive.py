@@ -9,6 +9,7 @@ https://massive.com/docs/rest/stocks/aggregates/custom-bars
 """
 from __future__ import annotations
 
+from copy import copy
 from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
 from email.utils import parsedate_to_datetime
@@ -46,6 +47,8 @@ class MassiveProvider(BaseDataProvider):
     ``timeout`` bounds each HTTP wait. ``max_retries`` bounds retries per page
     for connection failures, 429 and temporary server errors. Retry delays are
     capped at 60 seconds; a longer Retry-After fails instead of retrying early.
+    ``request_interval_seconds`` spaces HTTP request starts on this instance,
+    including pages, retries and successive tickers. Zero disables pacing.
     Long downloads use non-overlapping Eastern-date chunks below the vendor's
     base-aggregate limit, following every page before returning any data.
     """
@@ -55,7 +58,7 @@ class MassiveProvider(BaseDataProvider):
     supported_price_adjustments = frozenset({"unadjusted"})
 
     def __init__(self, *, api_key: str | None = None, timeout: float = 10.0,
-                 max_retries: int = 2) -> None:
+                 max_retries: int = 2, request_interval_seconds: float = 0.0) -> None:
         if api_key is not None and (not isinstance(api_key, str) or not api_key.strip()):
             raise ValueError("api_key must be a nonempty string or None.")
         if (isinstance(timeout, bool) or not isinstance(timeout, Real)
@@ -66,6 +69,16 @@ class MassiveProvider(BaseDataProvider):
         self._api_key = api_key.strip() if api_key is not None else None
         self.timeout = float(timeout)
         self.max_retries = max_retries
+        self.request_interval_seconds = _validate_request_interval(request_interval_seconds)
+        self._next_request_at: float | None = None
+
+    def with_request_interval(self, seconds: float | None = None) -> MassiveProvider:
+        """Copy configuration for one batch, with its own request clock."""
+        provider = copy(self)
+        provider.request_interval_seconds = _validate_request_interval(
+            self.request_interval_seconds if seconds is None else seconds)
+        provider._next_request_at = None
+        return provider
 
     def fetch(self, request: DataRequest) -> pl.DataFrame:
         return self.fetch_result(request).frame
@@ -83,7 +96,7 @@ class MassiveProvider(BaseDataProvider):
         first = request.start.date() if daily else request.start.astimezone(_EASTERN).date()
         last = request.end.date() if daily else request.end.astimezone(_EASTERN).date()
         stop = last + timedelta(days=1)
-        chunk_days = 365 if daily else 14  # <=20,220 minute bases, including DST.
+        chunk_days = 365 if daily else 30  # <50,000 minute bases, including DST and snapping.
         collected: dict[datetime, dict] = {}
         with requests.Session() as session:
             while first < stop:
@@ -143,13 +156,14 @@ class MassiveProvider(BaseDataProvider):
 
     def _get_page(self, session, url, params, headers):
         for attempt in range(self.max_retries + 1):
+            self._wait_for_request()
             try:
                 response = session.get(url, params=params, headers=headers,
                                        timeout=self.timeout, allow_redirects=False)
             except (requests.Timeout, requests.ConnectionError):
                 if attempt == self.max_retries:
                     raise ProviderError("Massive connection failed after bounded retries.") from None
-                clock.sleep(2 ** attempt)
+                self._defer_request(2 ** attempt)
                 continue
             except requests.RequestException:
                 # Vendor bodies, URLs and exception chains can contain secrets.
@@ -162,24 +176,47 @@ class MassiveProvider(BaseDataProvider):
                     except (ValueError, requests.RequestException):
                         raise ProviderError("Massive returned invalid JSON.") from None
                     return payload
-                if status in (429, 500, 502, 503, 504) and attempt < self.max_retries:
-                    delay = _retry_delay(response.headers.get("Retry-After"), attempt)
-                else:
+                retryable = status in (429, 500, 502, 503, 504)
+                # Keep rate-limit cooldowns even after this ticker fails, so
+                # the next ticker in the batch does not immediately retry it.
+                if status == 429 or (retryable and attempt < self.max_retries):
+                    delay = _retry_delay(response.headers.get("Retry-After"), attempt,
+                                         rate_limited=status == 429)
+                    self._defer_request(delay)
+                if not retryable or attempt == self.max_retries:
                     detail = {401: "invalid or missing API key", 403: "subscription or access restriction",
                               429: "rate limit exhausted"}.get(status, "request failed")
                     raise ProviderError(f"Massive HTTP {status}: {detail}.")
             finally:
                 response.close()
-            clock.sleep(delay)
         raise ProviderError("Massive request exhausted retries.")
+
+    def _wait_for_request(self):
+        if self._next_request_at is not None:
+            delay = self._next_request_at - clock.monotonic()
+            if delay > 0:
+                clock.sleep(delay)
+        self._next_request_at = clock.monotonic() + self.request_interval_seconds
+
+    def _defer_request(self, delay):
+        # Retry waits and pacing overlap; time spent receiving a response counts.
+        self._next_request_at = max(self._next_request_at, clock.monotonic() + delay)
 
 
 def _milliseconds(value: datetime) -> int:
     return (value - _EPOCH) // timedelta(milliseconds=1)
 
 
-def _retry_delay(value, attempt):
-    delay = float(2 ** attempt)
+def _validate_request_interval(value):
+    if (isinstance(value, bool) or not isinstance(value, Real)
+            or not math.isfinite(value) or value < 0):
+        raise ValueError("request_interval_seconds must be a finite nonnegative number.")
+    return float(value)
+
+
+def _retry_delay(value, attempt, *, rate_limited=False):
+    fallback = 60.0 if rate_limited else float(2 ** attempt)
+    delay = fallback
     if value:
         try:
             delay = float(value)
@@ -190,7 +227,7 @@ def _retry_delay(value, attempt):
                 pass
     if not math.isfinite(delay) or delay > 60:
         raise ProviderError("Massive requested a retry delay above 60 seconds; retry this fetch later.")
-    return max(0, delay)
+    return fallback if delay < 0 else delay
 
 
 def _next_page(value, path):

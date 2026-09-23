@@ -10,7 +10,8 @@ import polars as pl
 
 from .exceptions import InvalidDataRequestError
 from .models import DataRequest
-from .providers import ProviderRegistry, YFinanceProvider
+from .providers import MassiveProvider, ProviderRegistry, YFinanceProvider
+from .providers.massive import _validate_request_interval
 
 if TYPE_CHECKING:
     from .api import DataPipeline
@@ -48,11 +49,14 @@ class BatchFetchReport:
 
 
 def fetch_many(pipeline: DataPipeline, *, tickers, start, end, timeframe="1d",
-               provider="yahoo", skip_missing_ohlc: bool | None = None) -> BatchFetchReport:
+               provider="yahoo", skip_missing_ohlc: bool | None = None,
+               massive_request_interval_seconds: float | None = None) -> BatchFetchReport:
     """Save each ticker independently, recording ordinary failures and quality.
 
     ``None`` preserves the pipeline's registered provider configuration. An
     explicit Yahoo skip setting uses a separate provider for this batch only.
+    Massive uses one batch-local provider so pacing also spans ticker changes;
+    an explicit interval overrides its configured value without changing the registry.
     Interrupts and SystemExit propagate instead of becoming ticker failures.
     """
     if isinstance(tickers, (str, bytes)):
@@ -60,6 +64,13 @@ def fetch_many(pipeline: DataPipeline, *, tickers, start, end, timeframe="1d",
     tickers = tuple(tickers)
     if not tickers:
         raise InvalidDataRequestError("Supply at least one ticker.")
+    if massive_request_interval_seconds is not None:
+        if not isinstance(provider, str) or provider.strip().lower() != "massive":
+            raise InvalidDataRequestError("massive_request_interval_seconds is a Massive-specific setting.")
+        try:
+            massive_request_interval_seconds = _validate_request_interval(massive_request_interval_seconds)
+        except ValueError as exc:
+            raise InvalidDataRequestError(str(exc)) from None
     if skip_missing_ohlc is not None:
         if provider.strip().lower() != "yahoo":
             raise InvalidDataRequestError("skip_missing_ohlc is a Yahoo-specific setting.")
@@ -70,12 +81,27 @@ def fetch_many(pipeline: DataPipeline, *, tickers, start, end, timeframe="1d",
             "yahoo": YFinanceProvider(skip_missing_ohlc=skip_missing_ohlc),
         }))
     outcomes = []
+    batch_pipeline = None
     for ticker in tickers:
         symbol = str(ticker)
         try:
             request = DataRequest(symbol=ticker, start=start, end=end, timeframe=timeframe, provider=provider)
             symbol = request.symbol
-            result = pipeline.ingest(request).raw
+            if batch_pipeline is None:
+                if request.provider == "massive":
+                    adapter = pipeline.providers.get("massive")
+                    if isinstance(adapter, MassiveProvider):
+                        adapter = adapter.with_request_interval(massive_request_interval_seconds)
+                    elif massive_request_interval_seconds is not None:
+                        raise InvalidDataRequestError("Massive request pacing requires a MassiveProvider.")
+                    from .api import DataPipeline
+
+                    batch_pipeline = DataPipeline(pipeline.store.data_dir, providers=ProviderRegistry({
+                        "massive": adapter,
+                    }))
+                else:
+                    batch_pipeline = pipeline
+            result = batch_pipeline.ingest(request).raw
             metadata = json.loads(result.to_json())
             outcomes.append(FetchOutcome(symbol, "saved", (result.dataset_id,), result.row_count,
                                          quality=metadata.get("quality")))

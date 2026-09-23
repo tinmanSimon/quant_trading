@@ -29,10 +29,12 @@ class DataPipeline:
         self.providers = default_providers if providers is None else providers
 
     def fetch_many(self, tickers, *, start: datetime, end: datetime, timeframe="1d",
-                   provider="yahoo", skip_missing_ohlc: bool | None = None) -> BatchFetchReport:
+                   provider="yahoo", skip_missing_ohlc: bool | None = None,
+                   massive_request_interval_seconds: float | None = None) -> BatchFetchReport:
         """Fetch and save every ticker independently, returning per-ticker outcomes."""
         return fetch_many(self, tickers=tickers, start=start, end=end, timeframe=timeframe,
-                          provider=provider, skip_missing_ohlc=skip_missing_ohlc)
+                          provider=provider, skip_missing_ohlc=skip_missing_ohlc,
+                          massive_request_interval_seconds=massive_request_interval_seconds)
 
     def ingest(
         self, request: DataRequest, *, processors: Pipeline | Iterable[Processor] = (),
