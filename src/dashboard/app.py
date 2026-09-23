@@ -1,14 +1,17 @@
 """Run locally with: python -m streamlit run src/dashboard/app.py."""
 
 from datetime import UTC, date, datetime, time, timedelta
+from functools import partial
+from hashlib import sha256
 from pathlib import Path
 
 import polars as pl
 import streamlit as st
 
 from data_pipeline import DataQuery
-from dashboard.charts import CHART_CONFIG, bar_table, line_chart, price_chart
-from dashboard.chart_component import render_price_chart
+from dashboard.charts import CHART_CONFIG, bar_table, line_chart
+from dashboard.chart_cache import BoundedChartCache
+from dashboard.chart_component import render_series_chart
 from dashboard.deletion import deletion_page
 from dashboard.strategy_controls import strategy_specs
 from research import PreflightError, Research, ResearchError
@@ -62,7 +65,7 @@ def _metadata_rows(items):
     } for item in items]
 
 
-def _quality(items, start, end, *, present_timestamps=()):
+def _quality(items, start, end, *, present_timestamps=(), show_details=True):
     """Show recorded omissions without treating old metadata as proof of completeness."""
     omitted = []
     unknown = []
@@ -75,25 +78,37 @@ def _quality(items, start, end, *, present_timestamps=()):
             continue
         for bar in quality.omitted_bars:
             if start <= bar.timestamp < end:
-                omitted.append({"timestamp_utc": bar.timestamp, "reason": bar.reason,
-                                "dataset_id": item.dataset_id,
-                                "current_state": "present in selected data" if bar.timestamp in present
-                                                 else "absent from selected data"})
+                omitted.append((bar, item.dataset_id))
     if omitted:
-        absent = {item["timestamp_utc"] for item in omitted if item["timestamp_utc"] not in present}
-        restored = {item["timestamp_utc"] for item in omitted if item["timestamp_utc"] in present}
+        absent = {bar.timestamp for bar, _ in omitted if bar.timestamp not in present}
+        restored = {bar.timestamp for bar, _ in omitted if bar.timestamp in present}
         if absent:
             st.warning(f"{len(absent)} recorded omitted bars are still absent in this window. "
-                       "Dotted boundaries mark them on the chart; hover their labels for timestamps.")
+                       "Known omissions in the loaded chart window are marked; hover their labels for timestamps.")
         if restored:
             st.info(f"{len(restored)} previously omitted bars are present in the selected data. Their omission records are historical.")
-        st.dataframe(pl.DataFrame(omitted), hide_index=True)
+        if show_details:
+            st.dataframe(pl.DataFrame([{
+                "timestamp_utc": bar.timestamp, "reason": bar.reason, "dataset_id": dataset_id,
+                "current_state": "present in selected data" if bar.timestamp in present else "absent from selected data",
+            } for bar, dataset_id in omitted]), hide_index=True)
     if unknown:
         st.caption(f"Omission history is unavailable for {len(unknown)} selected revision(s). "
                    "Valid stored values and first/last bounds do not establish complete coverage.")
     elif not omitted:
         st.caption("No ingestion omissions were recorded in this window. Backtest preflight checks expected bar coverage separately.")
-    return sorted({item["timestamp_utc"] for item in omitted if item["timestamp_utc"] not in present})
+    return sorted({bar.timestamp for bar, _ in omitted if bar.timestamp not in present})
+
+
+def _chart_csv(pipeline, query, dataset_id=None):
+    """Read and verify again at download time, including after storage changes."""
+    frame = pipeline.read(query) if dataset_id is None else pipeline.read_dataset(dataset_id)
+    timestamp = pl.col("timestamp").cast(pl.Datetime("us", "UTC"))
+    if query.start is not None:
+        frame = frame.filter(timestamp >= pl.lit(query.start, dtype=pl.Datetime("us", "UTC")))
+    if query.end is not None:
+        frame = frame.filter(timestamp < pl.lit(query.end, dtype=pl.Datetime("us", "UTC")))
+    return frame.write_csv()
 
 
 def _data_page(research: Research):
@@ -140,36 +155,55 @@ def _data_page(research: Research):
     if start >= end:
         st.error("The end must be later than the start.")
         return
-    st.caption("Drag to zoom, scroll to zoom, or use the range slider. Double-click to reset. "
+    st.caption("Drag to zoom, scroll to zoom, or use the overview navigator. Double-click to reset. "
                "Candles are equally spaced: periods without stored bars are compressed. "
                "Price and volume scales fit the visible bars automatically. "
                "Daily and longer bars retain their session-date labels in every timezone.")
     if identity[1] in INTRADAY_DURATIONS:
         st.caption("Each candle is labeled by its start. The final bar of a trading session may be shorter than the selected interval.")
-    if mode == "One exact revision":
-        frame = research.pipeline.read_dataset(selected[0].dataset_id).filter(
-            (pl.col("timestamp") >= start) & (pl.col("timestamp") < end))
-    else:
-        frame = research.pipeline.read(DataQuery(layer=layer, provider=identity[0], symbol=symbol,
-                                               timeframe=identity[1], pipeline_id=identity[2] or None, start=start, end=end))
+    query = DataQuery(layer=layer, provider=identity[0], symbol=symbol, timeframe=identity[1],
+                      pipeline_id=identity[2] or None, start=start, end=end)
+    dataset_id = selected[0].dataset_id if mode == "One exact revision" else None
+    omitted = [bar.timestamp for item in selected if item.quality is not None
+               for bar in item.quality.omitted_bars if start <= bar.timestamp < end]
+    cache = st.session_state.get("market-chart-cache")
+    if not isinstance(cache, BoundedChartCache):
+        cache = BoundedChartCache()
+        st.session_state["market-chart-cache"] = cache
+    session_timezone = "America/New_York"
+    series = cache.load(research.pipeline, query, dataset_id=dataset_id, timeframe=identity[1],
+                        session_timezone=session_timezone, omitted_timestamps=omitted)
     with st.expander("Dataset metadata"):
         st.dataframe(pl.DataFrame(_metadata_rows(selected)), hide_index=True)
-    omitted = _quality(selected, start, end, present_timestamps=frame["timestamp"].to_list())
-    if frame.is_empty():
+    show_details = bool(omitted) and st.checkbox("Show omission details", key="browse-omission-details")
+    _quality(selected, start, end, present_timestamps=series.timestamps if series else (),
+             show_details=show_details)
+    if series is None:
         st.info("No saved bars fall inside this window.")
         return
-    st.caption(f"{frame.height:,} original bars available · opens on the latest {min(frame.height, 50)} · "
-               "zoom out for earlier bars · no downsampling or gap filling")
-    if frame.height > 20_000:
-        st.warning("This window contains more than 20,000 bars and may render slowly. Choose a shorter date range if needed.")
-    render_price_chart(price_chart(frame, timeframe=identity[1], timezone=timezone,
-                                   title=f"{symbol} · {identity[1]}", omitted_timestamps=omitted))
-    with st.expander("OHLCV rows"):
+    chart_id = sha256(repr((str(research.pipeline.store.data_dir), query, dataset_id,
+                           tuple(item.to_json() for item in sorted(selected, key=lambda item: item.dataset_id)),
+                           timezone, session_timezone)).encode()).hexdigest()
+    st.caption(f"{series.total_count:,} original bars available · opens on the latest {min(series.total_count, 50)} · "
+               "zoom out for a grouped overview or zoom in for original bars. Stored values are unchanged; gaps are not filled.")
+    st.caption("Display grouping uses America/New_York trading dates for U.S. stocks, including stored extended-hours bars. "
+               "Daily and calendar-week summaries are labelled on the chart.")
+    render_series_chart(series, chart_id=chart_id, timeframe=identity[1], timezone=timezone,
+                        title=f"{symbol} · {identity[1]}")
+    if st.checkbox("Show original bars", key="browse-show-original-bars"):
+        pages = (series.total_count + 499) // 500
+        page = st.number_input("Original bar page", min_value=1, max_value=pages, value=pages,
+                               step=1, key=f"browse-original-page-{chart_id}")
+        first_row = (page - 1) * 500
+        frame = series.frame.slice(first_row, 500)
+        st.caption(f"Original rows {first_row + 1:,}–{first_row + frame.height:,} of {series.total_count:,}.")
         st.dataframe(bar_table(frame, timeframe=identity[1], timezone=timezone), hide_index=True,
                      column_config={column: st.column_config.NumberColumn(format="plain")
                                     for column in ("open", "high", "low", "close", "volume")})
-        st.download_button("Download displayed bars as CSV", frame.write_csv(),
-                           file_name=f"{symbol}-{identity[1]}.csv", mime="text/csv")
+    st.download_button("Download original bars in selected date range as CSV",
+                       data=partial(_chart_csv, research.pipeline, query, dataset_id),
+                       file_name=f"{symbol}-{identity[1]}.csv", mime="text/csv",
+                       key=f"browse-csv-{chart_id}", on_click="ignore")
 
 
 def _fetch_page(research: Research):

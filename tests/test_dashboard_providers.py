@@ -76,6 +76,8 @@ def test_browse_and_backtest_select_exact_local_provider(tmp_path, monkeypatch):
             daily_frame('AAPL', offset))
     app = open_app(monkeypatch, research)
     assert app.selectbox(key='browse-provider').options == ['other', 'yahoo']
+    assert not [item for item in app.dataframe if 'close' in item.value.columns]
+    app.checkbox(key='browse-show-original-bars').check().run()
     # Inspect the actual rows rendered alongside the chart, not just menu labels.
     rows = [item.value for item in app.dataframe if 'close' in item.value.columns]
     assert rows[0]['close'].iloc[0] == 1101.
@@ -182,6 +184,7 @@ def test_massive_dashboard_fetch_and_browse_keep_vendor_data_separate(tmp_path, 
 
     app.sidebar.radio[0].set_value('Market data').run()
     app.selectbox(key='browse-provider').set_value('massive').run()
+    app.checkbox(key='browse-show-original-bars').check().run()
     rows = [item.value for item in app.dataframe if 'close' in item.value.columns]
     assert rows[0]['close'].iloc[0] == 1101.
     app.selectbox(key='browse-provider').set_value('yahoo').run()

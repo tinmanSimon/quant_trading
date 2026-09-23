@@ -1,4 +1,4 @@
-"""Plot original bars without resampling, filling, or changing numeric values.
+"""Plot original bars or explicitly labelled display summaries without gap filling.
 
 Candles use consecutive bar positions to compress periods without data.
 Intraday timestamps are explicitly
@@ -87,7 +87,8 @@ def price_chart(
     )
     figure.add_trace(
         go.Bar(
-            x=positions, y=frame["volume"].to_list(), name="Volume", text=hover, width=0.65,
+            x=positions, y=frame["volume"].to_list(), name="Volume", text=hover,
+            textposition="none", width=0.65,
             hovertemplate="%{text}<br>Volume: %{y}<extra></extra>",
             marker_color=["#18a999" if close >= opened else "#e76f51"
                           for close, opened in zip(frame["close"], frame["open"])],
@@ -150,4 +151,39 @@ def line_chart(
         xaxis={"type": "date", "rangeslider": {"visible": True, "thickness": 0.1}},
         yaxis_title=y_title, margin={"l": 20, "r": 20, "t": 45, "b": 20},
     )
+    return figure
+
+
+def window_price_chart(window, *, timeframe, timezone="America/New_York", title="",
+                       gap_markers=()):
+    """Build only the bounded display window, using global source-bar positions."""
+    figure = price_chart(window.frame, timeframe=timeframe, timezone=timezone, title=title)
+    labels = display_timestamps(window.starts, timeframe=timeframe, timezone=timezone)
+    end_labels = display_timestamps(window.ends, timeframe=timeframe, timezone=timezone)
+    hover = []
+    for index, (start, end, count) in enumerate(zip(labels, end_labels, window.source_counts)):
+        text = (f"{start}<br>Stored timestamp: {window.starts[index].isoformat()}" if count == 1
+                else f"Display summary: {start} through {end}<br>Source bars: {count}"
+                     f"<br>First/last source timestamps (UTC): {window.starts[index].isoformat()}"
+                     f" through {window.ends[index].isoformat()}")
+        text += f"<br>Recorded omissions within summary: {window.omitted_counts[index]}" if count > 1 else ""
+        hover.append(text)
+    figure.data[0].x = window.positions
+    figure.data[0].text = hover
+    figure.data[1].x = window.positions
+    figure.data[1].text = hover
+    figure.data[1].width = [width * 0.65 for width in window.widths]
+    figure.update_xaxes(range=window.view_range, minallowed=-0.5, maxallowed=window.total_count - 0.5,
+                        tickvals=window.positions[::max(1, len(labels) // 8)],
+                        ticktext=labels[::max(1, len(labels) // 8)], rangeslider_visible=False)
+    figure.update_layout(meta={"bar_labels": labels}, uirevision="window", margin_b=90)
+    figure.update_xaxes(automargin=True, title_standoff=16)
+    # Marker payload is bounded too. Complete provenance remains available in
+    # the on-demand omission table, even if a window has thousands of omissions.
+    for position, count, examples in gap_markers:
+        figure.add_shape(type="line", x0=position, x1=position, y0=0, y1=1, xref="x", yref="paper",
+                         line={"color": "#e9a23b", "width": 1, "dash": "dot"})
+        figure.add_annotation(x=position, y=1, xref="x", yref="paper", text=f"Missing: {count}",
+                              hovertext="<br>".join(examples), showarrow=False, yanchor="bottom",
+                              font={"color": "#b87913", "size": 10})
     return figure

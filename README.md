@@ -84,19 +84,34 @@ python -m streamlit run src/dashboard/app.py
 
 Open the local URL printed by Streamlit. The sidebar selects **Market data**,
 **Fetch**, **Backtest**, or **Saved runs**, and the data/results roots. Dataset
-charts have candlesticks, volume, drag/scroll zoom, a range slider and reset
+charts have candlesticks, volume, drag/scroll zoom, an overview navigator and reset
 controls. Charts open on the latest 50 bars (or all bars for smaller datasets);
-zoom out or use the slider to explore earlier bars. Candle hover includes OHLC
-and volume. Candles are equally spaced by actual stored bars, compressing nights,
-weekends and other empty periods. Zooming, panning and the range slider fit the
-price and volume scales to visible bars; candle widths follow the zoom level.
+use **All history**, **Latest 50**, or the overview's period sliders to navigate.
+Candle hover includes OHLC and volume. The horizontal axis advances by actual
+stored bars, compressing nights, weekends and other empty periods. Zooming and
+panning fit the price and volume scales to visible bars; candle widths follow
+the zoom level.
 Real timestamps remain on the labels and in hover text. Recorded omissions
 appear at compressed boundaries with their timestamps in hover text.
-The chart uses the installed Plotly bundle without a CDN. It shows original
-bars without resampling or gap filling. Intraday
-display timezones are selectable; daily timestamps remain session-date labels.
-Recorded omissions and unknown historical provenance are displayed explicitly.
-Large ranges can be slow to render; narrow the visible date range as needed.
+The chart uses the installed Plotly bundle without a CDN. Close views show original
+bars. Wide views use explicitly labelled **display-only summaries**: first open,
+maximum high, minimum low, last close, and summed volume. Hover identifies the
+source period and bar count. Intraday groups respect America/New_York trading
+dates and missing intervals; wider daily/calendar-week summaries retain stored
+extended-hours data. No bars are filled, and stored data, exports and backtests
+are unchanged. Intraday display timezones are selectable; daily timestamps remain
+session-date labels. Recorded omissions and unknown historical provenance remain
+visible, with full records available through **Show omission details**.
+
+The browser receives at most 2,000 candles including nearby buffers, plus a small
+full-history overview. Moving to earlier data replaces the old window and evicts
+its distant tail. Navigation is debounced, stale replies are ignored, and the
+previous chart stays visible while a new window loads. The server still reads
+and verifies the selected stored data; it retains prepared snapshots in a per-session
+LRU cache capped at four entries and 64 MiB. Deletion, replacement and file-integrity
+checks are never bypassed by this cache. **Show original bars** loads a paginated
+table (500 rows per page). CSV creation is deferred until download and reads the
+verified original data again.
 
 The same workflow is available from an interactive Python session:
 
@@ -377,7 +392,7 @@ To also test chart gestures, scaling and resize in an installed Chrome/Chromium
 browser (synthetic data only; no vendor requests):
 
 ```bash
-./venv/bin/python -m pytest tests/test_dashboard_chart_browser.py --run-browser
+./venv/bin/python -m pytest tests/test_dashboard_chart_browser.py tests/test_dashboard_chart_streamlit.py --run-browser
 ```
 
 Tests use per-test temporary directories and deterministic fixtures under

@@ -212,7 +212,7 @@ def test_dashboard_browses_verified_data_and_aborts_missing_ticker(tmp_path, mon
     view = AppTest.from_string("from dashboard.app import main\nmain()").run()
     assert not view.exception
     assert not view.error
-    assert len(view.get("bidi_component")) == 1
+    assert len(view.get("bidi_component")) == 2  # Constant Plotly runtime + bounded chart window.
     view.sidebar.radio[0].set_value("Backtest").run()
     next(item for item in view.text_input if item.label == "Additional required tickers").set_value("MSFT")
     next(item for item in view.button if item.label == "Validate all data and run").click().run(timeout=20)
