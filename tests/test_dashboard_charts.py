@@ -1,6 +1,6 @@
 """Chart construction must faithfully represent stored bars and their labels."""
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import polars as pl
 import pytest
@@ -15,7 +15,11 @@ def test_chart_preserves_every_numeric_value_and_does_not_mutate(sample_ohlcv_fr
     for name in ("open", "high", "low", "close"):
         assert list(getattr(chart.data[0], name)) == source[name].to_list()
     assert list(chart.data[1].y) == source["volume"].to_list()
+    assert list(chart.data[0].customdata) == source["volume"].to_list()
+    assert "Volume: %{customdata}" in chart.data[0].hovertemplate
     assert len(chart.data[0].x) == source.height
+    assert list(chart.data[0].x) == list(chart.data[1].x) == list(range(source.height))
+    assert chart.layout.xaxis.type == "linear"
     assert_frame_equal(source, sample_ohlcv_frame)
     assert CHART_CONFIG["scrollZoom"] is True
     assert chart.layout.xaxis2.rangeslider.visible is True
@@ -57,7 +61,67 @@ def test_missing_bar_markers_do_not_add_or_fill_rows(sample_ohlcv_frame):
     figure = price_chart(sample_ohlcv_frame, timeframe="1h", omitted_timestamps=[missing])
     assert len(figure.data[0].x) == sample_ohlcv_frame.height
     assert len(figure.layout.shapes) == 1
-    assert figure.layout.shapes[0].x0 == "2026-01-05T12:30:00"
+    assert figure.layout.shapes[0].x0 == sample_ohlcv_frame.height - 0.5
+    assert "2026-01-05T12:30:00" in figure.layout.annotations[0].hovertext
+    assert "2026-01-05T17:30:00+00:00" in figure.layout.annotations[0].hovertext
+
+
+@pytest.mark.parametrize("timeframe", ["1m", "15m", "1h", "1d"])
+def test_gaps_compress_without_changing_bars_or_real_labels(sample_ohlcv_frame, timeframe):
+    stamps = [datetime(2025, 1, day, 15, tzinfo=UTC) for day in (3, 6, 21)]
+    frame = sample_ohlcv_frame.with_columns(pl.Series("timestamp", stamps))
+    original = frame.clone()
+    chart = price_chart(frame, timeframe=timeframe, timezone="America/New_York")
+    assert list(chart.data[0].x) == list(chart.data[1].x) == [0, 1, 2]
+    assert list(chart.layout.xaxis.range) == [-0.5, 2.5]
+    assert chart.layout.xaxis.minallowed == -0.5 and chart.layout.xaxis.maxallowed == 2.5
+    assert chart.layout.meta["bar_labels"] == display_timestamps(stamps, timeframe=timeframe, timezone="America/New_York")
+    for index, stamp in enumerate(stamps):
+        assert stamp.isoformat() in chart.data[0].text[index]
+    for name in ("open", "high", "low", "close"):
+        assert list(getattr(chart.data[0], name)) == frame[name].to_list()
+    assert list(chart.data[1].y) == frame["volume"].to_list()
+    assert_frame_equal(frame, original)
+
+
+def test_omissions_share_boundaries_without_expanding_axis(sample_ohlcv_frame):
+    stamps = sample_ohlcv_frame["timestamp"].to_list()
+    middle = [stamps[0] + timedelta(minutes=10), stamps[0] + timedelta(minutes=20)]
+    missing = [stamps[0] - timedelta(days=1), *middle, stamps[-1] + timedelta(days=1),
+               middle[0], stamps[1]]  # Deduplicate omissions; ignore restored bars.
+    chart = price_chart(sample_ohlcv_frame, timeframe="1h", omitted_timestamps=missing)
+    assert [shape.x0 for shape in chart.layout.shapes] == [-0.5, 0.5, 2.5]
+    assert chart.layout.annotations[1].text == "Missing: 2"
+    assert all(stamp.isoformat() in chart.layout.annotations[1].hovertext for stamp in middle)
+    assert list(chart.layout.xaxis.range) == [-0.5, 2.5]
+    assert len(chart.data[0].x) == sample_ohlcv_frame.height
+
+
+def test_price_chart_requires_nonempty_chronological_unique_bars(sample_ohlcv_frame):
+    for frame in (sample_ohlcv_frame.head(0), sample_ohlcv_frame.reverse(),
+                  pl.concat([sample_ohlcv_frame.head(1)] * 2)):
+        with pytest.raises(ValueError):
+            price_chart(frame, timeframe="1h")
+
+
+@pytest.mark.parametrize("count", [1, 49, 50, 51, 2500])
+def test_initial_view_shows_latest_fifty_without_discarding_history(sample_ohlcv_frame, count):
+    frame = pl.concat([sample_ohlcv_frame.head(1)] * count).with_columns(
+        pl.Series("timestamp", [datetime(2025, 1, 1, tzinfo=UTC) + timedelta(minutes=i) for i in range(count)]))
+    chart = price_chart(frame, timeframe="1m")
+    expected = [max(0, count - 50) - 0.5, count - 0.5]
+    assert list(chart.layout.xaxis.range) == list(chart.layout.xaxis2.range) == expected
+    assert list(chart.layout.xaxis2.rangeslider.range) == [-0.5, count - 0.5]
+    assert list(chart.data[0].x) == list(range(count))
+    assert list(chart.data[1].y) == frame["volume"].to_list()
+    assert chart.layout.yaxis.automargin is True
+
+
+def test_candle_hover_preserves_fractional_volume(sample_ohlcv_frame):
+    volumes = [0.0, 100.125, 1000.1234567890123]
+    frame = sample_ohlcv_frame.with_columns(pl.Series("volume", volumes))
+    chart = price_chart(frame, timeframe="1h")
+    assert list(chart.data[0].customdata) == list(chart.data[1].y) == volumes
 
 
 def test_bar_table_keeps_numeric_precision(sample_ohlcv_frame):
@@ -148,7 +212,7 @@ def test_dashboard_browses_verified_data_and_aborts_missing_ticker(tmp_path, mon
     view = AppTest.from_string("from dashboard.app import main\nmain()").run()
     assert not view.exception
     assert not view.error
-    assert len(view.get("plotly_chart")) == 1
+    assert len(view.get("bidi_component")) == 1
     view.sidebar.radio[0].set_value("Backtest").run()
     next(item for item in view.text_input if item.label == "Additional required tickers").set_value("MSFT")
     next(item for item in view.button if item.label == "Validate all data and run").click().run(timeout=20)

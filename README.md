@@ -85,7 +85,15 @@ python -m streamlit run src/dashboard/app.py
 Open the local URL printed by Streamlit. The sidebar selects **Market data**,
 **Fetch**, **Backtest**, or **Saved runs**, and the data/results roots. Dataset
 charts have candlesticks, volume, drag/scroll zoom, a range slider and reset
-controls. They show original bars without resampling or gap filling. Intraday
+controls. Charts open on the latest 50 bars (or all bars for smaller datasets);
+zoom out or use the slider to explore earlier bars. Candle hover includes OHLC
+and volume. Candles are equally spaced by actual stored bars, compressing nights,
+weekends and other empty periods. Zooming, panning and the range slider fit the
+price and volume scales to visible bars; candle widths follow the zoom level.
+Real timestamps remain on the labels and in hover text. Recorded omissions
+appear at compressed boundaries with their timestamps in hover text.
+The chart uses the installed Plotly bundle without a CDN. It shows original
+bars without resampling or gap filling. Intraday
 display timezones are selectable; daily timestamps remain session-date labels.
 Recorded omissions and unknown historical provenance are displayed explicitly.
 Large ranges can be slow to render; narrow the visible date range as needed.
@@ -363,6 +371,13 @@ Run the normal, offline test suite with:
 
 ```bash
 ./venv/bin/python -m pytest
+```
+
+To also test chart gestures, scaling and resize in an installed Chrome/Chromium
+browser (synthetic data only; no vendor requests):
+
+```bash
+./venv/bin/python -m pytest tests/test_dashboard_chart_browser.py --run-browser
 ```
 
 Tests use per-test temporary directories and deterministic fixtures under

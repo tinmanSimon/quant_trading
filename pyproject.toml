@@ -19,6 +19,9 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+dashboard = ["*.js"]
+
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}
 
@@ -28,4 +31,5 @@ pythonpath = ["src"]
 addopts = ["-ra", "--strict-config", "--strict-markers"]
 markers = [
     "network: test that makes a live request to an external data provider",
+    "browser: offline interaction test requiring an installed Chrome/Chromium",
 ]

@@ -12,9 +12,16 @@ import polars as pl
 def pytest_addoption(parser):
     parser.addoption("--run-network", action="store_true", default=False,
                      help="Allow explicitly marked live vendor tests")
+    parser.addoption("--run-browser", action="store_true", default=False,
+                     help="Run offline chart interaction tests in installed Chrome/Chromium")
 
 
 def pytest_collection_modifyitems(config, items):
+    if not config.getoption("--run-browser"):
+        skip_browser = pytest.mark.skip(reason="Browser test; pass --run-browser to opt in")
+        for item in items:
+            if "browser" in item.keywords:
+                item.add_marker(skip_browser)
     if not config.getoption("--run-network"):
         skip = pytest.mark.skip(reason="Live vendor test; pass --run-network to opt in")
         for item in items:

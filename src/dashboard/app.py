@@ -8,6 +8,7 @@ import streamlit as st
 
 from data_pipeline import DataQuery
 from dashboard.charts import CHART_CONFIG, bar_table, line_chart, price_chart
+from dashboard.chart_component import render_price_chart
 from dashboard.deletion import deletion_page
 from dashboard.strategy_controls import strategy_specs
 from research import PreflightError, Research, ResearchError
@@ -82,7 +83,8 @@ def _quality(items, start, end, *, present_timestamps=()):
         absent = {item["timestamp_utc"] for item in omitted if item["timestamp_utc"] not in present}
         restored = {item["timestamp_utc"] for item in omitted if item["timestamp_utc"] in present}
         if absent:
-            st.warning(f"{len(absent)} recorded omitted bars are still absent in this window. Dotted lines mark them on the chart.")
+            st.warning(f"{len(absent)} recorded omitted bars are still absent in this window. "
+                       "Dotted boundaries mark them on the chart; hover their labels for timestamps.")
         if restored:
             st.info(f"{len(restored)} previously omitted bars are present in the selected data. Their omission records are historical.")
         st.dataframe(pl.DataFrame(omitted), hide_index=True)
@@ -139,6 +141,8 @@ def _data_page(research: Research):
         st.error("The end must be later than the start.")
         return
     st.caption("Drag to zoom, scroll to zoom, or use the range slider. Double-click to reset. "
+               "Candles are equally spaced: periods without stored bars are compressed. "
+               "Price and volume scales fit the visible bars automatically. "
                "Daily and longer bars retain their session-date labels in every timezone.")
     if identity[1] in INTRADAY_DURATIONS:
         st.caption("Each candle is labeled by its start. The final bar of a trading session may be shorter than the selected interval.")
@@ -154,12 +158,12 @@ def _data_page(research: Research):
     if frame.is_empty():
         st.info("No saved bars fall inside this window.")
         return
-    st.caption(f"{frame.height:,} original bars shown · no downsampling or gap filling")
+    st.caption(f"{frame.height:,} original bars available · opens on the latest {min(frame.height, 50)} · "
+               "zoom out for earlier bars · no downsampling or gap filling")
     if frame.height > 20_000:
         st.warning("This window contains more than 20,000 bars and may render slowly. Choose a shorter date range if needed.")
-    st.plotly_chart(price_chart(frame, timeframe=identity[1], timezone=timezone,
-                               title=f"{symbol} · {identity[1]}", omitted_timestamps=omitted),
-                    config=CHART_CONFIG, width="stretch")
+    render_price_chart(price_chart(frame, timeframe=identity[1], timezone=timezone,
+                                   title=f"{symbol} · {identity[1]}", omitted_timestamps=omitted))
     with st.expander("OHLCV rows"):
         st.dataframe(bar_table(frame, timeframe=identity[1], timezone=timezone), hide_index=True,
                      column_config={column: st.column_config.NumberColumn(format="plain")

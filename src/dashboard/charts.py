@@ -1,10 +1,13 @@
 """Plot original bars without resampling, filling, or changing numeric values.
 
-Plotly date axes use wall-clock labels. Intraday timestamps are explicitly
+Candles use consecutive bar positions to compress periods without data.
+Intraday timestamps are explicitly
 converted to the selected zone before serializing those labels; UTC is retained
 in hover text. Session-date labels never undergo timezone conversion.
 """
 
+from bisect import bisect_left
+from collections import defaultdict
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
@@ -58,52 +61,78 @@ def price_chart(
     frame: pl.DataFrame, *, timeframe: str, timezone: str = "America/New_York",
     title: str = "", omitted_timestamps: Iterable[datetime] = (),
 ) -> go.Figure:
-    """Candlesticks and volume using every supplied bar, including partial bars."""
+    """Keep every bar available; open the view on the latest 50 or fewer."""
     stamps = frame["timestamp"].to_list()
+    if not stamps:
+        raise ValueError("A price chart requires at least one bar.")
+    if any(current <= previous for previous, current in zip(stamps, stamps[1:])):
+        raise ValueError("Price chart bars must have unique, increasing timestamps.")
     labels = display_timestamps(stamps, timeframe=timeframe, timezone=timezone)
+    positions = list(range(len(stamps)))
     figure = make_subplots(
         rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.035,
         row_heights=[0.76, 0.24],
     )
-    hover = [f"Stored timestamp: {stamp.isoformat()}" for stamp in stamps]
+    hover = [f"{label}<br>Stored timestamp: {stamp.isoformat()}" for label, stamp in zip(labels, stamps)]
     figure.add_trace(
         go.Candlestick(
-            x=labels, open=frame["open"].to_list(), high=frame["high"].to_list(),
+            x=positions, open=frame["open"].to_list(), high=frame["high"].to_list(),
             low=frame["low"].to_list(), close=frame["close"].to_list(),
             text=hover, name="OHLC", increasing_line_color="#18a999",
             decreasing_line_color="#e76f51",
+            customdata=frame["volume"].to_list(),
+            hovertemplate=("%{text}<br>Open: %{open}<br>High: %{high}<br>Low: %{low}"
+                           "<br>Close: %{close}<br>Volume: %{customdata}<extra></extra>"),
         ), row=1, col=1,
     )
     figure.add_trace(
         go.Bar(
-            x=labels, y=frame["volume"].to_list(), name="Volume", text=hover,
+            x=positions, y=frame["volume"].to_list(), name="Volume", text=hover, width=0.65,
+            hovertemplate="%{text}<br>Volume: %{y}<extra></extra>",
             marker_color=["#18a999" if close >= opened else "#e76f51"
                           for close, opened in zip(frame["close"], frame["open"])],
         ), row=2, col=1,
     )
-    for label in display_timestamps(omitted_timestamps, timeframe=timeframe, timezone=timezone):
-        # Shapes mark an absent bar; no fabricated OHLC/volume values are added.
+    gaps = defaultdict(list)
+    present = set(stamps)
+    for stamp in sorted(set(omitted_timestamps) - present):
+        # Group omissions at the boundary between existing bars, including
+        # the outer edges. Never create an extra candle slot for a missing bar.
+        boundary = bisect_left(stamps, stamp) - 0.5
+        label = display_timestamps([stamp], timeframe=timeframe, timezone=timezone)[0]
+        gaps[boundary].append(f"{label} (UTC: {stamp.isoformat()})")
+    for boundary, missing in gaps.items():
         figure.add_shape(
-            type="line", x0=label, x1=label, y0=0, y1=1, xref="x", yref="paper",
+            type="line", x0=boundary, x1=boundary, y0=0, y1=1, xref="x", yref="paper",
             line={"color": "#e9a23b", "width": 1, "dash": "dot"},
         )
         figure.add_annotation(
-            x=label, y=1, xref="x", yref="paper", text="Missing bar",
+            x=boundary, y=1, xref="x", yref="paper", text=f"Missing: {len(missing)}",
+            hovertext="<br>".join(missing),
             showarrow=False, yanchor="bottom", font={"color": "#b87913", "size": 10},
         )
     date_labels = timeframe.endswith(("d", "wk", "mo"))
     figure.update_layout(
-        title=title, height=650, margin={"l": 20, "r": 20, "t": 70, "b": 20},
-        dragmode="zoom", hovermode="x unified", showlegend=False,
+        title=title, height=650, margin={"l": 85, "r": 25, "t": 70, "b": 20},
+        dragmode="zoom", hovermode="closest", showlegend=False,
         xaxis_rangeslider_visible=False,
+        meta={"bar_labels": labels},
     )
-    figure.update_xaxes(type="date", fixedrange=False)
+    first_visible = max(0, len(stamps) - 50)
+    ticks = positions[first_visible::max(1, (min(len(positions), 50) + 7) // 8)]
+    figure.update_xaxes(type="linear", fixedrange=False, range=[first_visible - 0.5, len(stamps) - 0.5],
+                        minallowed=-0.5, maxallowed=len(stamps) - 0.5,
+                        tickmode="array", tickvals=ticks, ticktext=[labels[index] for index in ticks])
     figure.update_xaxes(
-        title_text="Session date" if date_labels else f"Bar start ({timezone})",
-        rangeslider={"visible": True, "thickness": 0.09}, row=2, col=1,
+        title_text=("Session date" if date_labels else f"Bar start ({timezone})") + " · gaps compressed",
+        rangeslider={"visible": True, "thickness": 0.09, "range": [-0.5, len(stamps) - 0.5]}, row=2, col=1,
     )
-    figure.update_yaxes(title_text="Price", fixedrange=False, row=1, col=1)
-    figure.update_yaxes(title_text="Volume", fixedrange=False, rangemode="tozero", row=2, col=1)
+    # Leave room for complete numbers and separate titles; let long labels grow
+    # the margin instead of clipping leading digits. Tick precision stays adaptive.
+    figure.update_yaxes(automargin=True, title_standoff=12, tickfont_size=12, ticks="outside")
+    figure.update_yaxes(title_text="Price", fixedrange=True, nticks=6,
+                        exponentformat="none", separatethousands=True, row=1, col=1)
+    figure.update_yaxes(title_text="Volume", fixedrange=True, rangemode="tozero", nticks=4, row=2, col=1)
     return figure
 
 
