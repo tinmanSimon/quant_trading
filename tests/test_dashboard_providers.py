@@ -2,9 +2,10 @@
 from datetime import UTC, date, datetime
 
 import polars as pl
+from polars.testing import assert_frame_equal
 from streamlit.testing.v1 import AppTest
 
-from data_pipeline import DataRequest
+from data_pipeline import DataQuery, DataRequest, FetchQuality, FetchResult
 from data_pipeline.providers import BaseDataProvider, ProviderRegistry, YFinanceProvider
 from research import Research
 
@@ -115,3 +116,71 @@ def test_provider_without_declared_intervals_cannot_submit_fetch(tmp_path, monke
     assert any('no fetch intervals' in warning.value for warning in app.warning)
     assert not app.text_area
     assert other.requests == []
+
+
+def test_massive_is_discovered_without_credentials_or_network(tmp_path, monkeypatch):
+    from data_pipeline.providers import MassiveProvider
+
+    monkeypatch.delenv('MASSIVE_API_KEY', raising=False)
+    research = Research(tmp_path / 'data', tmp_path / 'runs')
+    assert 'massive' in research.pipeline.providers.names()
+    assert isinstance(research.pipeline.providers.get('massive'), MassiveProvider)
+    app = open_app(monkeypatch, research)
+    app.sidebar.radio[0].set_value('Fetch').run()
+    app.selectbox(key='fetch-provider').set_value('massive').run()
+    assert not app.exception and not app.error
+    assert {'massive', 'yahoo'} <= set(app.selectbox(key='fetch-provider').options)
+    assert set(app.selectbox(key='fetch-timeframe').options) == {
+        '1m', '2m', '5m', '15m', '30m', '1h', '90m', '1d',
+    }
+    assert not app.checkbox  # The missing-OHLC option belongs to Yahoo only.
+
+
+def test_massive_dashboard_fetch_and_browse_keep_vendor_data_separate(tmp_path, monkeypatch):
+    from data_pipeline.providers import MassiveProvider
+
+    monkeypatch.delenv('MASSIVE_API_KEY', raising=False)
+    research = Research(tmp_path / 'data', tmp_path / 'runs')
+    start, end = datetime(2024, 1, 2, tzinfo=UTC), datetime(2024, 1, 10, tzinfo=UTC)
+    research.pipeline.ingest_frame(DataRequest('AAPL', start, end, provider='yahoo', timeframe='1d'),
+                                   daily_frame('AAPL'))
+    calls = []
+    source = daily_frame('AAPL', offset=1000).with_columns(
+        # Provider results use canonical session-date labels at UTC midnight.
+        pl.col('timestamp').cast(pl.Datetime('ms', 'UTC')))
+
+    def fetch_result(self, request):
+        calls.append(request)
+        return FetchResult(source, FetchQuality(status='reported'))
+
+    monkeypatch.setattr(MassiveProvider, 'fetch_result', fetch_result)
+    app = open_app(monkeypatch, research)
+    app.sidebar.radio[0].set_value('Fetch').run()
+    app.selectbox(key='fetch-provider').set_value('massive').run()
+    app.selectbox(key='fetch-timeframe').set_value('1d').run()
+    app.text_area[0].set_value('AAPL')
+    app.date_input(key='fetch-start').set_value(start.date())
+    app.date_input(key='fetch-end').set_value(end.date())
+    next(b for b in app.button if b.label == 'Fetch and save').click().run()
+    assert not app.exception and not app.error
+    assert [(r.provider, r.symbol, r.timeframe) for r in calls] == [('massive', 'AAPL', '1d')]
+    report = app.session_state['fetch-report']
+    assert report.ok
+    massive_id = report.outcomes[0].dataset_ids[0]
+    assert_frame_equal(research.pipeline.read_dataset(massive_id), source)
+    assert research.pipeline.read(DataQuery(provider='yahoo', symbol='AAPL'))['close'][0] == 101.
+
+    app.sidebar.radio[0].set_value('Market data').run()
+    app.selectbox(key='browse-provider').set_value('massive').run()
+    rows = [item.value for item in app.dataframe if 'close' in item.value.columns]
+    assert rows[0]['close'].iloc[0] == 1101.
+    app.selectbox(key='browse-provider').set_value('yahoo').run()
+    rows = [item.value for item in app.dataframe if 'close' in item.value.columns]
+    assert rows[0]['close'].iloc[0] == 101.
+
+    app.sidebar.radio[0].set_value('Backtest').run()
+    app.selectbox(key='backtest-provider').set_value('massive').run()
+    assert not app.exception and not app.error
+    assert app.multiselect[0].options == ['AAPL']
+    assert len(calls) == 1  # Local-data pages do not fetch again.
+    assert_frame_equal(research.pipeline.read_dataset(massive_id), source)

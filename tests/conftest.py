@@ -44,6 +44,18 @@ def prevent_accidental_yahoo_requests(request, monkeypatch):
         monkeypatch.setattr(YfData, "cache_get", blocked)
 
 
+@pytest.fixture(autouse=True)
+def prevent_accidental_http_requests(request, monkeypatch):
+    """Massive and other HTTP clients need explicit mocks in offline tests."""
+    if "network" not in request.keywords:
+        import requests
+
+        def blocked(*args, **kwargs):
+            raise AssertionError("Unexpected live HTTP request in an offline test")
+
+        monkeypatch.setattr(requests.sessions.Session, "request", blocked)
+
+
 @pytest.fixture
 def isolated_data_dir(tmp_path: Path) -> Path:
     """Return a per-test data directory that is never the project's real data/ root."""

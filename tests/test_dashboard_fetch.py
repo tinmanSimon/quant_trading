@@ -33,6 +33,7 @@ def test_dashboard_batch_fetch_uses_pipeline_and_keeps_later_successes(
     monkeypatch.setattr(YFinanceProvider, "fetch_result", fetch_result)
     app = AppTest.from_string("from dashboard.app import main\nmain()").run()
     app.sidebar.radio[0].set_value("Fetch").run()
+    app.selectbox(key="fetch-provider").set_value("yahoo").run()
     app.text_area[0].set_value("aapl, BAD, MSFT")
     app.selectbox(key="fetch-timeframe").set_value("1h")
     day = sample_ohlcv_frame["timestamp"][0].date()

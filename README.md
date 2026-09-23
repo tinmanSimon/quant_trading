@@ -2,7 +2,7 @@
 
 An OHLCV ingestion package with interchangeable providers, local raw/processed
 Parquet storage, ordered processors, revision history, and a Python/CLI query API.
-Yahoo Finance is the included vendor adapter.
+Yahoo Finance and Massive (formerly Polygon.io) are the included vendor adapters.
 
 The `data_pipeline` package also handles batch fetching and per-ticker outcomes.
 The `research` package adds strict local-data preflight,
@@ -373,6 +373,8 @@ explicitly enabled:
 
 ```bash
 ./venv/bin/python -m pytest --run-network -m network tests/test_yahoo_live.py
+# Requires MASSIVE_API_KEY and access to the requested historical data:
+./venv/bin/python -m pytest --run-network -m network tests/test_massive_live.py
 ```
 
 ## Current data contract
@@ -444,6 +446,67 @@ storage identity and cannot bypass overlap protection. Other providers retain
 case-sensitive instrument identifiers. Local symbol queries apply Yahoo's
 case normalization even when the provider filter is omitted.
 
+## Fetch from Massive
+
+The default registry includes `massive`; select it in the dashboard's **Fetch**
+provider menu or pass `provider="massive"` to the pipeline. Credentials are
+checked only when fetching, so local browsing and provider discovery work
+without an API key. Set the key in the environment before launching Python or
+Streamlit; keep real credentials out of source files and version control:
+
+```bash
+export MASSIVE_API_KEY="your-api-key"
+```
+
+```python
+from datetime import UTC, datetime
+from data_pipeline import DataPipeline, DataQuery
+
+pipeline = DataPipeline("data")
+report = pipeline.fetch_many(
+    ["AAPL", "MSFT"], provider="massive", timeframe="15m",
+    start=datetime(2024, 1, 2, tzinfo=UTC),
+    end=datetime(2024, 1, 6, tzinfo=UTC),
+)
+print(report.to_frame())
+bars = pipeline.read(DataQuery(provider="massive", symbol="AAPL", timeframe="15m"))
+```
+
+Choose dates covered by your subscription. Use exact, case-sensitive vendor
+symbols, including the historical ticker when requesting covered delisted
+stocks. This adapter does not build historical stock universes or add delisting
+accounting to the simulator. Do not pass Yahoo's `skip_missing_ohlc` option.
+
+`MassiveProvider(api_key=None, timeout=10, max_retries=2)` also accepts an
+explicit key for a custom registry. Its native intervals are `1m`, `2m`, `5m`,
+`15m`, `30m`, `1h`, `90m` and `1d`; `60m` requests normalize to `1h`.
+Requests explicitly use unadjusted prices, download every page, and split long
+ranges below the base-bar limit. Connection failures, HTTP 429 and selected
+temporary server errors receive bounded retries. HTTP 401 indicates invalid
+credentials; HTTP 403 can indicate subscription/history restrictions. A failed
+download saves nothing for that ticker, while later tickers are still attempted.
+
+Vendor OHLCV values, including fractional volume, are retained without filling
+gaps or resampling. Missing or invalid numeric values fail validation. Intraday
+timestamps and extended-hours bars are preserved; native hourly and 90-minute
+grids are not moved to the regular-session open. Daily timestamps are converted
+from their Eastern session date to the canonical UTC-midnight date label;
+prices are unchanged. Missing-bar provenance remains `unknown`, since the
+aggregate response does not explain every absent bar.
+
+**Storage and charting support all these intervals; backtesting requires a
+compatible schedule.** Preflight rejects extended-hours or misaligned bars in
+its required window. Native hourly bars therefore do not match our 09:30-anchored
+session grid, and a calendar-day download is not automatically ready for a
+regular-session backtest. Massive daily backtests use completed prior-day bars
+for next-session-open execution, with the same coverage and warm-up checks as
+other providers. This assumes the prior-day historical values are available
+before the next open; historical bars may include later vendor corrections.
+The recorded decision timestamp retains the engine's regular-session-close
+convention. No session filtering, alternative bar grid, or simulation changes
+are implied by adding the provider. See [Massive's aggregate API](https://massive.com/docs/rest/stocks/aggregates/custom-bars)
+for vendor coverage and aggregate semantics.
+
 ## Structure
 
 ```text
@@ -454,7 +517,7 @@ src/data_pipeline/
 ├── models.py              # DataRequest and DataQuery
 ├── exceptions.py          # Specific validation/provider/storage errors
 ├── schemas/ohlcv.py        # Canonical frame contract and validation
-├── providers/             # Common fetch interface, registry, Yahoo adapter
+├── providers/             # Common interface, registry, Yahoo and Massive adapters
 ├── processing/            # Shared execution, contracts, validation and registry
 │   └── processors/        # Shared base.py, plus scaling.py and resampling.py
 └── storage/               # Immutable files, DuckDB catalog, locking, metadata

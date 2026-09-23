@@ -1,12 +1,13 @@
-"""Public provider contract, Yahoo implementation and default registry."""
+"""Public provider contract, vendor implementations and default registry."""
 
 from .base import BaseDataProvider
 from .registry import ProviderEntry, ProviderFactory, ProviderRegistry
 from .yahoo import YFinanceProvider
+from .massive import MassiveProvider
 
 
-registry = ProviderRegistry({"yahoo": YFinanceProvider})
-"""Default registry; Yahoo is constructed lazily when requested."""
+registry = ProviderRegistry({"yahoo": YFinanceProvider, "massive": MassiveProvider})
+"""Default registry; providers are constructed lazily when requested."""
 
 
 def register_provider(
@@ -27,6 +28,7 @@ __all__ = [
     "ProviderFactory",
     "ProviderRegistry",
     "YFinanceProvider",
+    "MassiveProvider",
     "get_provider",
     "register_provider",
     "registry",

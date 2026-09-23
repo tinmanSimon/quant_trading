@@ -293,6 +293,7 @@ def test_dashboard_fetch_to_local_backtest_preserves_selected_interval(tmp_path,
     monkeypatch.setattr(dashboard, "Research", lambda **kwargs: research)
     view = AppTest.from_string("from dashboard.app import main\nmain()").run()
     view.sidebar.radio[0].set_value("Fetch").run()
+    view.selectbox(key="fetch-provider").set_value("yahoo").run()
     assert set(view.selectbox(key="fetch-timeframe").options) == set(fetch_timeframes(YFinanceProvider.supported_timeframes))
     view.selectbox(key="fetch-timeframe").set_value(interval).run()
     view.text_area[0].set_value("AAPL")
