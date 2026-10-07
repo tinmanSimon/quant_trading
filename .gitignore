@@ -12,3 +12,7 @@ __pycache__/
 .coverage
 htmlcov/
 *.egg-info/
+
+# Local editor settings and AWS configuration/credentials
+/.vscode/
+/.aws
