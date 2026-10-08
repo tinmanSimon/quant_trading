@@ -7,6 +7,7 @@ runs/
 *.db
 *.sqlite
 venv/
+.python-runtime/
 __pycache__/
 .pytest_cache/
 .coverage
@@ -16,3 +17,4 @@ htmlcov/
 # Local editor settings and AWS configuration/credentials
 /.vscode/
 /.aws
+/.local/

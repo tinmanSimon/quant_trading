@@ -27,8 +27,9 @@ STREAMLIT_INTERACTIONS = r"""
     const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
     const close = (a, b) => Math.abs(a - b) < 1e-7;
     function check(ok, message) { if (!ok) throw new Error(message); }
-    async function until(test, message) {
-        for (let i = 0; i < 600; i++) { if (test()) return; await pause(25); }
+    async function until(test, message, timeout = 15000) {
+        const deadline = performance.now() + timeout;
+        while (performance.now() < deadline) { if (test()) return; await pause(25); }
         throw new Error(message + ": " + document.body.textContent.slice(-2500));
     }
     async function test() {
@@ -133,6 +134,95 @@ STREAMLIT_INTERACTIONS = r"""
             && chart.data[0].x[0] < 1000 && chart.data[0].x.at(-1) < 1300,
             "earlier pan did not load and replace the server window");
         verify();
+        button("Latest 50").click();
+        await until(() => close(chart.layout.xaxis.range[0], end - 50), "latest bars did not restore for trend analysis");
+        const trendRange = [end - 20, end];
+        await Plotly.relayout(chart, {"xaxis.range": trendRange});
+        await until(() => close(chart.layout.xaxis.range[0], trendRange[0]), "trend local zoom did not finish");
+        function toggleTrends() {
+            const checkbox = document.querySelector('input[aria-label="Analyze trends"]');
+            check(checkbox, "missing Analyze trends checkbox");
+            checkbox.click();
+        }
+        function boundaryControl() {
+            return [...document.querySelectorAll('[data-testid="stSelectbox"]')]
+                .find(item => item.textContent.includes("Boundary matching rule"));
+        }
+        const selectedBoundaryRule = () => boundaryControl()?.querySelector('[role="combobox"]')?.value;
+        toggleTrends();
+        await until(() => [...document.querySelectorAll('button')].some(item => item.textContent.trim() === "Apply and analyze"),
+                    "trend configuration form did not open");
+        await until(() => document.querySelector('input[aria-label="Maximum lookback per endpoint (bars)"]')?.value === "8",
+                    "saved configuration did not load");
+        await until(() => Number(document.querySelector('input[aria-label="Redundancy tolerance (%)"]')?.value) === 25
+            && selectedBoundaryRule() === "Either boundary (OR)",
+            "saved redundancy percentage and boundary rule did not load");
+        button("Apply and analyze").click();
+        await until(() => chart.data?.length > 2 && document.body.textContent.includes("Analysis range:"),
+                    "trend form did not produce a chart overlay and result table", 90000);
+        check(chart.layout.xaxis.range.every((value, index) => close(value, trendRange[index])), "analysis reset local zoom");
+        check(document.querySelector('[data-testid="stDataFrame"]'), "trend result table is missing");
+        const visibleTraces = () => chart.data.slice(2).filter(trace => trace.x.length);
+        await until(() => visibleTraces().length > 1 && visibleTraces().every(trace =>
+            trace.x[0] >= trendRange[0] && trace.x.at(-1) <= trendRange[1]),
+            "latest historical overlays were not sampled for the visible range");
+        const curveNumber = chart.data.findIndex((trace, index) => index > 1 && trace.x.length);
+        const trendTrace = chart.data[curveNumber];
+        check(visibleTraces().every(trace => trace.x.at(-1) <= end - 0.5),
+              "historical fit extends past its observed data");
+        check(new Set(visibleTraces().map(trace => trace.x.at(-1))).size > 1,
+              "historical chart still contains only one final endpoint");
+        const intervals = visibleTraces().map(trace => [trace.x[0], trace.x.at(-1)]);
+        check(intervals.some((interval, index) => intervals.slice(index + 1).some(other =>
+            Math.min(interval[1], other[1]) > Math.max(interval[0], other[0]))),
+            "nearby-boundary grouping still suppressed all overlapping intervals");
+        check(visibleTraces().every(trace => trace.meta.lambda_values.length > 0
+            && trace.meta.primary_lambda === Math.min(...trace.meta.lambda_values)),
+            "historical overlays lost segmentation lambda provenance");
+        Plotly.Fx.hover(chart, [{curveNumber, pointNumber: Math.floor(trendTrace.x.length / 2)}]);
+        check(chart.querySelector(".hoverlayer").textContent.includes("Clarity:")
+            && chart.querySelector(".hoverlayer").textContent.includes("Color λ:"),
+            "actual dashboard trend hover lacks metrics or lambda labels");
+        Plotly.Fx.unhover(chart);
+        button("All history").click();
+        await until(() => close(chart.layout.xaxis.range[0], -0.5)
+            && chart.data[0].x.length <= 1000 && visibleTraces().length > 100,
+            "grouped all-history chart did not render its historical trend intervals");
+        check(visibleTraces().every(trace => trace.x[0] >= 0 && trace.x.at(-1) <= end - 0.5),
+              "all-history trend fit extends outside its observed source bars");
+        check(visibleTraces().every(trace => trace.x.length <= 768), "all-history trend traces exceeded their point budget");
+        verify();
+        await Plotly.relayout(chart, {"xaxis.range": [999.5, 1049.5]});
+        await until(() => close(chart.layout.xaxis.range[0], 999.5)
+            && chart.data[0].x[0] < 1000 && chart.data[0].x.at(-1) < 1300
+            && visibleTraces().length > 1 && visibleTraces().every(trace =>
+                trace.x[0] >= 999.5 && trace.x.at(-1) <= 1049.5),
+            "historical navigation did not load earlier trend intervals");
+        check(new Set(visibleTraces().map(trace => trace.x.at(-1))).size > 1,
+              "earlier chart shows only a single endpoint trend");
+        check(visibleTraces().every(trace => trace.x[0] >= 999.5 && trace.x.at(-1) <= 1049.5),
+              "historical overlays were not clipped to the visible source coordinates");
+        verify();
+        button("Latest 50").click();
+        await until(() => close(chart.layout.xaxis.range[0], end - 50)
+            && visibleTraces().length > 1, "latest historical trends did not restore");
+        await Plotly.relayout(chart, {"xaxis.range": trendRange});
+        await until(() => close(chart.layout.xaxis.range[0], trendRange[0]), "local trend zoom did not restore");
+        toggleTrends();
+        await until(() => chart.data?.length === 2, "checkbox did not remove trend overlays");
+        check(chart.layout.xaxis.range.every((value, index) => close(value, trendRange[index])), "checkbox reset local zoom");
+        toggleTrends();
+        await until(() => chart.data?.length > 2, "re-enabled analysis did not reuse its matching result");
+        check(Number(document.querySelector('input[aria-label="Redundancy tolerance (%)"]')?.value) === 25
+            && selectedBoundaryRule() === "Either boundary (OR)",
+            "re-enabled analysis lost its applied redundancy settings");
+        button("Restore trend defaults").click();
+        await until(() => chart.data?.length === 2
+            && document.querySelector('input[aria-label="Maximum lookback per endpoint (bars)"]')?.value === "2000"
+            && Number(document.querySelector('input[aria-label="Redundancy tolerance (%)"]')?.value) === 5
+            && selectedBoundaryRule() === "Both boundaries (AND)",
+            "restoring defaults did not invalidate the old result and restore form values");
+        verify();
         check(!document.querySelector('[data-testid="stException"]'), "Streamlit raised an application exception");
         result.textContent = "PASS";
     }
@@ -161,8 +251,16 @@ def test_chart_streamlit_window_round_trips(tmp_path):
     DataPipeline(root).store.write_raw(
         DataRequest("TEST", stamps[0], stamps[-1] + timedelta(hours=1), timeframe="1h"), frame)
     app = tmp_path / "chart_app.py"
+    from dashboard.trend_settings import load_trend_settings, save_trend_settings
+    from trend_analysis import TrendConfig
+
+    settings_path = tmp_path / "trend_config.json"
+    save_trend_settings(TrendConfig(max_history=8, redundancy_percentage=25.0,
+                                   redundancy_boundary_rule="or"), settings_path)
     app.write_text(
         "import streamlit as st\nfrom dashboard.app import _data_page\nfrom research import Research\n"
+        "from pathlib import Path\nimport dashboard.trend_settings as settings\n"
+        f"settings.DEFAULT_SETTINGS_PATH = Path({str(settings_path)!r})\n"
         "st.set_page_config(layout='wide')\n"
         f"_data_page(Research({str(root)!r}, runs_dir={str(tmp_path / 'runs')!r}))\n",
         encoding="utf-8",
@@ -198,7 +296,8 @@ def test_chart_streamlit_window_round_trips(tmp_path):
             assert ready, log.read()
             _run_browser_document(tmp_path, url=f"http://127.0.0.1:{port}",
                                   browser_js=STREAMLIT_INTERACTIONS,
-                                  screenshot_path=tmp_path / "chart-window.png")
+                                  screenshot_path=tmp_path / "chart-window.png", timeout_seconds=120)
+            assert load_trend_settings(settings_path).config == TrendConfig()
         finally:
             process.terminate()
             try:

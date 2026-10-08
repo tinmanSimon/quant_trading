@@ -227,7 +227,8 @@ def test_chart_browser_interactions(tmp_path, single, latest):
     _run_browser_document(tmp_path, browser_document(single=single, latest=latest))
 
 
-def _run_browser_document(tmp_path, document=None, *, url=None, browser_js=None, screenshot_path=None):
+def _run_browser_document(tmp_path, document=None, *, url=None, browser_js=None, screenshot_path=None,
+                          timeout_seconds=45):
     browser = next((found for name in ("google-chrome", "chromium", "chromium-browser")
                     if (found := shutil.which(name))), None)
     assert browser, "Install Chrome/Chromium to run --run-browser tests."
@@ -286,7 +287,7 @@ def _run_browser_document(tmp_path, document=None, *, url=None, browser_js=None,
                             break
                         time.sleep(0.05)
                     command("Runtime.evaluate", expression=browser_js)
-                deadline = time.monotonic() + 45
+                deadline = time.monotonic() + timeout_seconds
                 result = "PENDING"
                 while time.monotonic() < deadline:
                     state = command("Runtime.evaluate", expression='document.getElementById("result")?.textContent',
@@ -514,3 +515,158 @@ def dynamic_browser_document():
 @pytest.mark.browser
 def test_windowed_chart_browser_navigation(tmp_path):
     _run_browser_document(tmp_path, dynamic_browser_document())
+
+
+TREND_INTERACTIONS = r"""
+const result = document.getElementById("result");
+const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+function check(ok, message) { if (!ok) throw new Error(message); }
+function close(a, b) { return Math.abs(a - b) < 1e-7; }
+async function until(test, message) {
+    for (let i = 0; i < 200; i++) { if (test()) return; await pause(25); }
+    throw new Error(message);
+}
+async function test() {
+    const host = document.getElementById("host"), calls = [];
+    const mount = data => render({parentElement: host, data: structuredClone(data),
+                                 setStateValue: (name, value) => calls.push(value)});
+    const cleanup = mount(fixtures.latest);
+    const chart = host.firstElementChild;
+    await until(() => chart.layout?.yaxis?.autorange === false, "chart did not fit");
+    await pause(350);
+    const localRange = [2970.25, 2990.75];
+    await Plotly.relayout(chart, {"xaxis.range": localRange});
+    await until(() => close(chart.layout.xaxis.range[0], localRange[0]), "local pan did not finish");
+    const beforeOverlay = calls.length;
+    const volumeBefore = chart.layout.yaxis2.range.slice();
+    mount(fixtures.overlay);
+    await until(() => chart.data.length === 4 && chart.layout.yaxis.range[1] > 150, "same-request overlay ignored");
+    check(chart.layout.xaxis.range.every((value, i) => close(value, localRange[i])), "overlay reset local zoom");
+    check(calls.length === beforeOverlay, "overlay triggered a viewport fetch");
+    check(chart.layout.yaxis2.range.every((value, i) => close(value, volumeBefore[i])), "overlay changed volume scale");
+    check(chart.layout.yaxis.range[1] < 1000, "offscreen trend expanded the visible price scale");
+    const line = chart.data[2], descriptor = fixtures.overlay.trend_overlays[0];
+    const nested = chart.data[3];
+    check(nested.meta.trend_id === "nested" && nested.x.length > 0,
+          "nested trend was suppressed by the longer interval");
+    check(line.line.color !== nested.line.color, "different numeric lambdas share a color");
+    check(line.meta.primary_lambda === 0.25 && nested.meta.primary_lambda === 2,
+          "browser discarded numeric lambda metadata");
+    check(JSON.stringify(line.meta.lambda_values) === "[0.25,0.5]", "browser discarded additional lambda provenance");
+    const initialColor = line.line.color;
+    check(line.x[0] >= fixtures.latest.loaded_range[0] && line.x.at(-1) <= 2999, "line extrapolated");
+    check(line.x.length <= 768, "line payload is unbounded");
+    check(line.xaxis === "x" && line.yaxis === "y", "line is not attached to price axes");
+    const edgePrice = Math.exp(descriptor.intercept + descriptor.slope * (localRange[1] - descriptor.start_index));
+    check(chart.layout.yaxis.range[1] > edgePrice, "fractional visible edge was clipped");
+    const point = line.x.findIndex(value => value >= 2980);
+    Plotly.Fx.hover(chart, [{curveNumber: 2, pointNumber: point}]);
+    const hover = chart.querySelector(".hoverlayer").textContent;
+    check(hover.includes("Clarity: 0.860") && hover.includes("Boundary robustness: 90.0%")
+          && hover.includes("local countertrend") && hover.includes("Duration: 1000 bars")
+          && hover.includes("Segmentation λ values: 0.25, 0.5")
+          && hover.includes("Color λ: 0.25"), "line hover omitted metrics or lambda provenance");
+    Plotly.Fx.unhover(chart);
+
+    await Plotly.relayout(chart, {"xaxis.range": [2980, 2981]});
+    await until(() => chart.data[2].x.length > 100 && chart.data[2].x[0] === 2980,
+                "deep zoom did not resample the same fitted curve");
+    const box = chart.getBoundingClientRect(), full = chart._fullLayout;
+    const hoveredX = 2980.501;
+    const hoveredY = Math.exp(descriptor.intercept + descriptor.slope * (hoveredX - descriptor.start_index));
+    chart.querySelector(".nsewdrag").dispatchEvent(new MouseEvent("mousemove", {bubbles: true,
+        clientX: box.left + full.xaxis._offset + full.xaxis.l2p(hoveredX),
+        clientY: box.top + full.yaxis._offset + full.yaxis.l2p(hoveredY)}));
+    await until(() => chart.querySelector(".hoverlayer").textContent.includes("Clarity: 0.860"),
+                "pointer over line did not show trend metrics after deep zoom");
+    await Plotly.relayout(chart, {"xaxis.range": localRange});
+    await until(() => close(chart.layout.xaxis.range[0], localRange[0]), "local range did not restore");
+
+    const beforePan = calls.length;
+    await Plotly.relayout(chart, {"xaxis.range": [2099.5, 2149.5]});
+    await until(() => calls.length > beforePan, "distant pan did not request a window");
+    const request = calls.at(-1);
+    const disabled = structuredClone(fixtures.latest);
+    disabled.overlay_revision = 2;
+    mount(disabled);
+    await until(() => chart.data.length === 2, "disable during navigation was ignored");
+    check(chart.layout.xaxis.range.every((value, i) => close(value, localRange[i])), "disable moved into unloaded window");
+    const oldConfigReply = structuredClone(fixtures.earlier);
+    oldConfigReply.request_id = request.request_id;
+    mount(oldConfigReply);
+    await until(() => close(chart.layout.xaxis.range[0], 2099.5), "current viewport response was lost");
+    check(chart.data.length === 2, "viewport response restored disabled overlays");
+
+    const currentCandles = chart.data[0].x.slice();
+    const staleViewportNewOverlay = structuredClone(fixtures.overlay);
+    staleViewportNewOverlay.overlay_revision = 3;
+    mount(staleViewportNewOverlay);
+    await until(() => chart.data.length === 3, "new overlay on stale viewport was discarded");
+    check(chart.data[0].x.every((value, i) => close(value, currentCandles[i])), "overlay restored obsolete candles");
+    check(close(chart.layout.xaxis.range[0], 2099.5), "overlay restored obsolete viewport");
+    check(chart.data[2].x[0] >= fixtures.earlier.loaded_range[0]
+          && chart.data[2].x.at(-1) <= fixtures.earlier.loaded_range[1], "overlay sampled obsolete loaded range");
+    check(chart.data[2].line.color === initialColor, "navigation changed lambda color");
+    mount(disabled);
+    await pause(250);
+    check(chart.data.length === 3, "older overlay response replaced current settings");
+
+    // An accepted navigation with old configuration still uses the newest fit.
+    const beforeAll = calls.length;
+    [...host.querySelectorAll("button")].find(item => item.textContent === "All history").click();
+    await until(() => calls.length > beforeAll, "all history did not request data");
+    const all = structuredClone(fixtures.all);
+    all.request_id = calls.at(-1).request_id;
+    mount(all);
+    await until(() => close(chart.layout.xaxis.range[0], -0.5), "all history did not apply");
+    check(chart.data.length === 5, "grouped view lost current overlay descriptors");
+    check(chart.data[2].x[0] === 2000 && chart.data[2].x.at(-1) === 2999, "grouping moved the trend endpoints");
+    const groupedNested = chart.data.find(trace => trace.meta?.trend_id === "nested");
+    check(groupedNested.x[0] === 2500 && groupedNested.x.at(-1) === 2990,
+          "grouped view lost nested interval endpoints");
+    check(chart.data[2].line.color === initialColor, "grouping changed lambda color");
+    check(chart.data[0].x.length < 3000, "all history was not grouped");
+    check(chart.data[2].x.length <= 768, "grouped trend is not bounded");
+    const hidden = structuredClone(fixtures.latest);
+    hidden.overlay_revision = 4;
+    mount(hidden);
+    await until(() => chart.data.length === 2 && chart.layout.yaxis.range[1] < 200, "remove did not restore price scale");
+    check(close(chart.layout.xaxis.range[0], -0.5), "remove reset grouped viewport");
+    cleanup();
+    result.textContent = "PASS";
+}
+window.addEventListener("unhandledrejection", event => { result.textContent = "FAIL: " + event.reason; });
+test().catch(error => { result.textContent = "FAIL: " + error.stack; });
+document.querySelectorAll("script").forEach(script => script.remove());
+"""
+
+
+def trend_browser_document():
+    import math
+    from dashboard.chart_component import window_payload
+    from test_dashboard_trend_overlays import series, trend
+
+    source = series()
+    fits = [trend(), trend(start=2500, end=2990, trend_id="nested", direction=-1,
+                          intercept=math.log(180), slope=-0.0001,
+                          lambda_values=(2.0,), lambda_levels=(3,)),
+            trend(start=0, end=100, trend_id="T2", intercept=math.log(1e8))]
+    options = dict(chart_id="trend-test", timeframe="1h", timezone="UTC")
+    fixtures = {
+        "latest": window_payload(source, **options),
+        "overlay": window_payload(source, **options, trends=fits, overlay_revision=1),
+        "earlier": window_payload(source, **options, trends=fits, overlay_revision=1,
+                                  request=dict(chart_id="trend-test", request_id=1,
+                                               start=2099.5, end=2149.5, width=1000)),
+        "all": window_payload(source, **options, request=dict(chart_id="trend-test", request_id=2,
+                                                               start=-0.5, end=2999.5, width=1000)),
+    }
+    encoded = json.dumps(fixtures).replace("<", "\\u003c")
+    return ("<!doctype html><meta charset='utf-8'><div id='host' style='width:1000px'></div>"
+            "<pre id='result'>PENDING</pre><script type='module'>" + _javascript()
+            + "\nconst fixtures = " + encoded + ";\n" + TREND_INTERACTIONS + "</script>")
+
+
+@pytest.mark.browser
+def test_trend_overlay_browser_hover_navigation_and_revision_merge(tmp_path):
+    _run_browser_document(tmp_path, trend_browser_document())

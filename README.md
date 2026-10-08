@@ -11,9 +11,11 @@ A local Streamlit dashboard provides dataset navigation and interactive charts.
 
 ## Research quick start
 
-Activate the environment once per terminal, then use the short commands:
+Create the environment with Python 3.12 or newer (required by the pinned
+dependencies), then activate it once per terminal:
 
 ```bash
+python3.12 -m venv venv
 source venv/bin/activate
 python -m pip install -r requirements.txt -r requirements-dev.txt
 python -m pip install -e . --no-deps
@@ -81,6 +83,133 @@ Launch the dashboard from the repository root:
 ```bash
 python -m streamlit run src/dashboard/app.py
 ```
+
+### Causal historical trend analysis
+
+On **Market data**, enable **Analyze trends**, adjust the prefilled settings if
+needed, then choose **Apply and analyze**. This describes the original close
+prices in the selected ticker/provider/revision/date range; it does not forecast
+returns. The chart's zoom and pan only change the view. They never refit a trend
+or analyze display-grouped candles. Every eligible endpoint in the selected
+history is analyzed using only observations at or before that endpoint. Discovery,
+volatility normalization, scoring, and tail diagnosis all use that same prefix.
+Results therefore have different end dates, rather than all ending on the last
+selected bar. Broad and local trends may disagree at any given endpoint.
+
+The chart shows every accepted interval except those matched by the redundancy
+rule, including overlapping long and short trends when they remain distinct.
+**Redundancy tolerance (%)** defaults to **5%**. For each pair of same-direction
+intervals, the comparison resolution is
+`max(minimum bars, percentage / 100 * shorter length)`. **Minimum redundancy
+resolution (bars)** defaults to **5** and is saved with the other settings;
+set it to **0** to use only the percentage. The minimum applies to both rules.
+Length counts source bars including both endpoints. Boundary distances
+are compared inclusively against that resolution without rounding. **Boundary
+matching rule** offers **Both boundaries (AND)** (the default), which requires
+both start and end differences to be within the resolution, or **Either boundary
+(OR)**, which requires only one. OR can suppress different trend scales that
+share a start or end, even at 0%. With both the percentage and minimum set to
+zero, AND only matches identical boundaries and OR matches either exact boundary.
+
+Selection is greedy in descending clarity order; ties favor longer intervals,
+then later endpoints, then the interval ID. A candidate matching any already
+retained interval becomes redundant and references the highest-ranked match.
+Only retained representatives participate, so matches never chain through a
+redundant interval. This display choice does not refit, merge, or rewrite any
+analysis. The table retains every accepted
+interval with **On chart** or **Redundant** status and a reference to its
+representative. Rejected candidates are **Uncertain** in the diagnostics table,
+with the reason they failed acceptance.
+
+Intervals carry all numerical **lambda (λ)** penalties that discovered their
+boundaries, together with their penalty-grid levels. A single boundary can be
+discovered at several penalties; it is still one interval. Each line's color is
+determined by its smallest λ, and hover shows all its λ values alongside the
+interval, direction, clarity, rate, robustness, and tail diagnosis. Colors stay
+consistent when zooming or panning. A candidate discovered only by tail diagnosis
+is labeled as such and uses a separate neutral style, because it has no
+segmentation λ. Each endpoint uses its own penalty grid and volatility, so
+similar intervals at successive endpoints need not have identical λ values.
+Adding observations can change which archived intervals represent nearby
+results on the chart, but cannot change an earlier interval's metrics or λ
+provenance when its inputs and configuration are unchanged.
+
+The applied settings are saved atomically in `.local/trend_config.json` relative
+to this checkout, shared across tickers and dashboard sessions. They survive
+restarts and are Git-ignored. Unapplied form edits are not saved. **Restore trend
+defaults** persists the defaults and invalidates the previous analysis. Invalid
+saved settings produce a warning instead of being silently overwritten. If two
+dashboard sessions save settings, the last save wins; each displayed analysis
+still carries the configuration that produced it.
+Older saved bar-based redundancy settings load with the new 5%/AND defaults
+and a migration notice; other saved settings are preserved. The old file remains
+unchanged until **Apply and analyze** saves the new format. Explicit percentage
+and boundary-rule values take precedence if a file contains both formats.
+
+Each endpoint uses at most **Maximum lookback per endpoint (bars)** preceding
+observations, including that endpoint (default and maximum: 2,000). At least
+eight observations are required for a segment. This limits each calculation's
+lookback, not the historical endpoints reported: successful analysis covers
+the entire selected history once enough observations are available. Historical
+analysis costs more than a single snapshot; progress is shown, results are
+cached, and no endpoints are silently skipped. Large rolling-window requests
+that exceed the exact-computation work budget fail before analysis with a
+request to narrow the date range or lower the per-endpoint lookback; they never
+return a silently shortened history. Bars with potentially unfinished periods are
+excluded: intraday bars wait their nominal duration; calendar bars wait until
+their labelled period ends in America/New_York. This conservative policy can
+delay inclusion of shortened session bars or an already closed daily session.
+The current stored values are not guaranteed to be point-in-time vendor data;
+later vendor revisions or adjustments can change a fresh historical analysis.
+
+The independent package accepts an ordered single-series Polars dataframe with
+timezone-aware timestamps and positive finite prices:
+
+```python
+from trend_analysis import TrendConfig, analyze, analyze_current
+
+result = analyze(
+    frame,
+    timestamp_col="timestamp",
+    price_col="close",
+    config=TrendConfig(clarity_threshold=0.70, penalty_multiplier=1.2),
+)
+print(result.to_frame())
+
+# Optional: only structures ending at the latest selected observation.
+current = analyze_current(frame)
+```
+
+The package has no dashboard, fetching, storage, or market-calendar dependency.
+Callers supply completed observations. An optional `as_of` truncates input at a
+timestamp before any estimation. Input rows must have unique increasing
+timestamps; the package does not fill gaps or alter the dataframe. Source-row
+indices remain relative to the supplied frame, including rolling lookback
+offsets. `analyze` / `analyze_history` return the historical archive;
+`analyze_current` returns one endpoint's snapshot. `replay` yields independent
+current snapshots for requested review dates. Historical interval IDs include
+their start and end indices; they are stable within the same source frame.
+
+The estimator proposes variable-length intervals using penalized piecewise
+log-price regression at multiple resolutions. It combines ordinary regression,
+Theil–Sen slope, chronological ordering, and directional efficiency with default
+weights 0.25/0.20/0.35/0.20. Separate magnitude, direction-agreement, and boundary
+robustness gates control acceptance. Tail diagnostics distinguish recent slope
+changes, flattening, level changes, countertrends, and young abrupt counter-moves.
+All candidates that pass acceptance remain in the analysis archive; redundancy
+is classified only for display. The older `dedup_ratio` setting is accepted for
+saved-settings compatibility but no longer removes intervals. Fitted curves use a robust
+log-price slope and median residual intercept, and end at their own observed
+endpoint. Future prices are never used to find an earlier interval's boundaries.
+
+Clarity is an engineering score, not a probability or a significance test.
+Unclear does not mean sideways. No detected tail change does not confirm future
+continuation. Estimated starts describe the structure visible at the analysis
+endpoint; they are not historical detection dates. Thresholds are starting
+settings for visual development, not validated market constants. Use historical
+prefixes, inspect charts before revealing overlays, tune one parameter family
+at a time, and reserve later untouched periods for frozen-configuration review.
+No labeled training dataset is required.
 
 Open the local URL printed by Streamlit. The sidebar selects **Market data**,
 **Fetch**, **Backtest**, or **Saved runs**, and the data/results roots. Dataset

@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "quant-trading"
 version = "0.1.0"
 description = "Local data-ingestion and storage components for quantitative trading research."
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dynamic = ["dependencies"]
 
 [project.scripts]

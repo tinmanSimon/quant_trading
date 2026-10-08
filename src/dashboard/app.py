@@ -14,6 +14,9 @@ from dashboard.chart_cache import BoundedChartCache
 from dashboard.chart_component import render_series_chart
 from dashboard.deletion import deletion_page
 from dashboard.strategy_controls import strategy_specs
+from dashboard.trend_input import completed_prefix
+from dashboard.trend_selection import select_trends
+from dashboard.trends import render_trend_controls, render_trend_results
 from research import PreflightError, Research, ResearchError
 from research.backtesting import ExecutionSettings
 from research.timeframes import BACKTEST_TIMEFRAMES, INTRADAY_DURATIONS, fetch_timeframes
@@ -188,8 +191,42 @@ def _data_page(research: Research):
                "zoom out for a grouped overview or zoom in for original bars. Stored values are unchanged; gaps are not filled.")
     st.caption("Display grouping uses America/New_York trading dates for U.S. stocks, including stored extended-hours bars. "
                "Daily and calendar-week summaries are labelled on the chart.")
+    # Calendar start/end selectors filter session labels, not UTC completion
+    # instants. Intraday bounds are instants and also limit the completion cutoff.
+    cutoff = datetime.now(UTC)
+    if not identity[1].endswith(("d", "wk", "mo")):
+        cutoff = min(cutoff, end)
+    trend_frame = completed_prefix(series.frame, timeframe=identity[1], cutoff=cutoff,
+                                   session_timezone=session_timezone)
+    trend_identity = (str(research.pipeline.store.data_dir), query, dataset_id,
+                      tuple(item.to_json() for item in sorted(selected, key=lambda item: item.dataset_id)))
+    # A stable container prevents conditional controls from moving the chart's
+    # Streamlit element path, unmounting it, and losing browser-local navigation.
+    with st.container():
+        trend_result = render_trend_controls(trend_frame, timeframe=identity[1], identity=trend_identity)
+        if st.session_state.get("analyze-trends") and trend_frame.height < series.total_count:
+            st.caption(f"Trend analysis excludes {series.total_count - trend_frame.height} potentially unfinished bars. "
+                       "Intraday bars wait their full nominal duration; calendar bars wait until their labelled "
+                       "period ends in America/New_York.")
+    # Overlay changes have their own sequence. Browser navigation requests keep
+    # their sequence and range even when settings or visibility change.
+    trend_selection = (select_trends(
+        trend_result.trends,
+        redundancy_percentage=trend_result.config.redundancy_percentage,
+        redundancy_boundary_rule=trend_result.config.redundancy_boundary_rule,
+        redundancy_min_bars=trend_result.config.redundancy_min_bars,
+    ) if trend_result is not None else None)
+    chart_trends = trend_selection.chart_trends if trend_selection is not None else ()
+    trend_signature = repr((chart_id, chart_trends))
+    if st.session_state.get("trend-overlay-signature") != trend_signature:
+        st.session_state["trend-overlay-signature"] = trend_signature
+        st.session_state["trend-overlay-revision"] = st.session_state.get("trend-overlay-revision", 0) + 1
     render_series_chart(series, chart_id=chart_id, timeframe=identity[1], timezone=timezone,
-                        title=f"{symbol} · {identity[1]}")
+                        title=f"{symbol} · {identity[1]}",
+                        trends=chart_trends,
+                        overlay_revision=st.session_state.get("trend-overlay-revision", 0))
+    if trend_result is not None:
+        render_trend_results(trend_result, selection=trend_selection)
     if st.checkbox("Show original bars", key="browse-show-original-bars"):
         pages = (series.total_count + 499) // 500
         page = st.number_input("Original bar page", min_value=1, max_value=pages, value=pages,

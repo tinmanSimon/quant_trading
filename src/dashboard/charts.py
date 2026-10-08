@@ -16,6 +16,8 @@ import polars as pl
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+from .trend_overlays import trend_traces
+
 
 CHART_CONFIG = {
     "scrollZoom": True,
@@ -155,7 +157,7 @@ def line_chart(
 
 
 def window_price_chart(window, *, timeframe, timezone="America/New_York", title="",
-                       gap_markers=()):
+                       gap_markers=(), trend_overlays=()):
     """Build only the bounded display window, using global source-bar positions."""
     figure = price_chart(window.frame, timeframe=timeframe, timezone=timezone, title=title)
     labels = display_timestamps(window.starts, timeframe=timeframe, timezone=timezone)
@@ -186,4 +188,5 @@ def window_price_chart(window, *, timeframe, timezone="America/New_York", title=
         figure.add_annotation(x=position, y=1, xref="x", yref="paper", text=f"Missing: {count}",
                               hovertext="<br>".join(examples), showarrow=False, yanchor="bottom",
                               font={"color": "#b87913", "size": 10})
+    figure.add_traces(trend_traces(trend_overlays, window.loaded_range))
     return figure

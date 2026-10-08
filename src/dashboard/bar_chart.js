@@ -22,6 +22,9 @@ export default function render({parentElement, data, setStateValue}) {
     let range = boundedRange(data.view_range || data.figure.layout.xaxis.range);
     let wanted = range.slice();
     let latestRequested = data.request_id || 0, applied = latestRequested;
+    let overlayRevision = data.overlay_revision || 0;
+    let overlays = data.trend_overlays || [];
+    let sampledOverlayView = "";
     let resolutionBudget = data.width_budget || Math.max(200, Math.min(1000, chart.clientWidth || 900));
     let sentBudget = resolutionBudget, observedWidth = chart.clientWidth;
     let pending = false, disposed = false, initialized = false;
@@ -34,6 +37,60 @@ export default function render({parentElement, data, setStateValue}) {
         const center = (requested[0] + requested[1]) / 2;
         const left = Math.max(-0.5, Math.min(count - 0.5 - width, center - width / 2));
         return [left, left + width];
+    }
+
+    function trendPrice(trend, position) {
+        return Math.exp(trend.intercept + trend.slope * (position - trend.start_index));
+    }
+
+    function withOverlays(base) {
+        // Overlay changes need not carry the currently displayed server window.
+        // Always sample descriptors against the window we actually accepted.
+        const traces = base.figure.data.filter(trace => !trace.meta?.trend_overlay);
+        for (const trend of overlays) {
+            const first = Math.max(trend.start_index, base.loaded_range[0]);
+            const last = Math.min(trend.end_index, base.loaded_range[1]);
+            if (last < first) continue;
+            const size = Math.min(768, Math.max(2, Math.ceil(last - first) + 1));
+            const x = Array.from({length: size}, (_, index) => first + (last - first) * index / (size - 1));
+            traces.push({type: "scatter", mode: "lines", x, y: x.map(value => trendPrice(trend, value)),
+                name: trend.name || trend.trend_id, line: trend.line, hovertemplate: trend.hovertemplate,
+                xaxis: "x", yaxis: "y", showlegend: false,
+                meta: {trend_overlay: true, trend_id: trend.trend_id,
+                    lambda_values: trend.lambda_values, lambda_levels: trend.lambda_levels,
+                    primary_lambda: trend.primary_lambda, origin: trend.origin}});
+        }
+        const layout = {...base.figure.layout,
+            xaxis: {...base.figure.layout.xaxis, range: range.slice(), autorange: false},
+            xaxis2: {...base.figure.layout.xaxis2, range: range.slice(), autorange: false}};
+        if (initialized && chart.layout) layout.dragmode = chart.layout.dragmode;
+        return {...base, overlay_revision: overlayRevision, trend_overlays: overlays,
+            figure: {...base.figure, data: traces, layout}};
+    }
+
+    async function sampleVisibleOverlays() {
+        const signature = [range[0], range[1], chart.clientWidth, overlayRevision, applied].join("/");
+        if (signature === sampledOverlayView) return;
+        sampledOverlayView = signature;
+        const descriptors = new Map(overlays.map(trend => [trend.trend_id, trend]));
+        const indices = [], xs = [], ys = [];
+        payload.figure.data.forEach((trace, index) => {
+            if (!trace.meta?.trend_overlay) return;
+            const trend = descriptors.get(trace.meta.trend_id);
+            if (!trend) return;
+            const first = Math.max(trend.start_index, range[0]);
+            const last = Math.min(trend.end_index, range[1]);
+            // Plotly line hover uses nearby sampled points. Adapt the samples
+            // to the visible pixels so deep zoom still permits hovering along
+            // the curve. This evaluates the same fit; it never reruns analysis.
+            const width = chart.clientWidth * Math.max(0, last - first) / (range[1] - range[0]);
+            const size = Math.min(768, Math.max(2, Math.ceil(width / 6) + 1));
+            const x = last < first ? [] : Array.from({length: size}, (_, item) => first + (last - first) * item / (size - 1));
+            indices.push(index);
+            xs.push(x);
+            ys.push(x.map(position => trendPrice(trend, position)));
+        });
+        if (indices.length) await window.Plotly.restyle(chart, {x: xs, y: ys}, indices);
     }
 
     function drawOverview() {
@@ -151,6 +208,7 @@ export default function render({parentElement, data, setStateValue}) {
 
     async function fit() {
         if (disposed || !initialized) return;
+        await sampleVisibleOverlays();
         const figure = payload.figure, candles = figure.data[0], volumes = figure.data[1].y;
         const labels = figure.layout.meta.bar_labels;
         const visible = [];
@@ -163,6 +221,20 @@ export default function render({parentElement, data, setStateValue}) {
             low = Math.min(low, candles.low[index]);
             high = Math.max(high, candles.high[index]);
             volume = Math.max(volume, volumes[index]);
+        }
+        for (const trend of overlays) {
+            const first = Math.max(trend.start_index, range[0]);
+            const last = Math.min(trend.end_index, range[1]);
+            if (last < first) continue;
+            // A log-linear fit is monotone. Evaluate exact clipped endpoints,
+            // including fractional viewport edges between rendered samples.
+            for (const position of [first, last]) {
+                const value = trendPrice(trend, position);
+                if (Number.isFinite(value)) {
+                    low = Math.min(low, value);
+                    high = Math.max(high, value);
+                }
+            }
         }
         const tickCount = Math.max(2, Math.min(12, Math.floor(chart.clientWidth / 140)));
         const step = Math.max(1, Math.ceil(visible.length / tickCount));
@@ -231,21 +303,35 @@ export default function render({parentElement, data, setStateValue}) {
     function update(next, callback) {
         if (disposed || next.chart_id !== chartId) return;
         send = callback || send;
-        if (!dynamic || next.request_id < latestRequested || next.request_id <= applied) return;
+        if (!dynamic) return;
         work = work.then(async () => {
-            if (disposed || next.request_id < latestRequested || next.request_id <= applied) return;
-            payload = next;
-            applied = next.request_id;
-            latestRequested = applied;
-            resolutionBudget = next.width_budget || sentBudget;
-            pending = false;
-            range = boundedRange(next.view_range);
-            wanted = range.slice();
-            await window.Plotly.react(chart, next.figure.data, next.figure.layout,
-                {...next.config, responsive: false, doubleClick: "reset"});
+            if (disposed) return;
+            const newWindow = next.request_id >= latestRequested && next.request_id > applied;
+            const newOverlays = (next.overlay_revision || 0) > overlayRevision;
+            if (!newWindow && !newOverlays) return;
+            if (newOverlays) {
+                overlayRevision = next.overlay_revision;
+                overlays = next.trend_overlays || [];
+            }
+            if (newWindow) {
+                payload = next;
+                applied = next.request_id;
+                latestRequested = applied;
+                resolutionBudget = next.width_budget || sentBudget;
+                pending = false;
+                range = boundedRange(next.view_range);
+                wanted = range.slice();
+            }
+            // A late navigation response may contain older overlay settings;
+            // a new overlay may contain an old navigation response. Merge these
+            // independent revisions without rolling either dimension backward.
+            payload = withOverlays(payload);
+            sampledOverlayView = "";
+            await window.Plotly.react(chart, payload.figure.data, payload.figure.layout,
+                {...payload.config, responsive: false, doubleClick: "reset"});
             await fit();
             // The layout may have changed while this request was in flight.
-            if (!disposed && needsWindow(wanted)) navigate(wanted);
+            if (!disposed && newWindow && needsWindow(wanted)) navigate(wanted);
         }).catch(showError);
     }
 
