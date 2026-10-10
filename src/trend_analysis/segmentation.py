@@ -37,21 +37,23 @@ class LinearCosts:
         return cost, slope, intercept, np.clip(r2, 0, 1)
 
 
-def _penalties(n: int, full_cost: float, config: TrendConfig) -> np.ndarray:
-    """Construct one prefix's penalty grid, including its no-split level."""
-    base = config.penalty_multiplier * math.log(n)
-    first = base * 2.0 ** -4
+def penalty_grid(config: TrendConfig) -> tuple[float, ...]:
+    """Fixed numerical λ values determined only by configuration.
+
+    The legacy penalty_multiplier field now specifies the starting λ directly.
+    Neither the input length, its prices, nor endpoint volatility changes this
+    grid. All configured levels are evaluated, even if some choose the same fit.
+    """
+    first = float(config.penalty_multiplier)
     if not np.isfinite(first) or first <= 0:
         raise ValueError("penalty_multiplier is outside the numerically supported range")
     levels = [first]
-    while levels[-1] <= full_cost:
-        if len(levels) >= 256:
-            raise ValueError("Penalty grid exceeds 256 levels; increase penalty_multiplier or penalty_grid_step")
+    for _ in range(1, config.penalty_grid_levels):
         next_level = levels[-1] * 2.0 ** config.penalty_grid_step
         if not math.isfinite(next_level) or next_level <= levels[-1]:
             raise ValueError("penalty_multiplier is outside the numerically supported range")
         levels.append(next_level)
-    return np.asarray(levels)
+    return tuple(levels)
 
 
 PenaltyProvenance = dict[int, tuple[tuple[int, float], ...]]
@@ -65,7 +67,8 @@ def _provenance(starts: np.ndarray, penalties: np.ndarray) -> PenaltyProvenance:
     return {start: tuple(collected[start]) for start in sorted(collected)}
 
 
-def candidate_provenance(costs: LinearCosts, sigma: float, config: TrendConfig) -> PenaltyProvenance:
+def candidate_provenance(costs: LinearCosts, sigma: float, config: TrendConfig, *,
+                         penalties: np.ndarray | None = None) -> PenaltyProvenance:
     """Map each final-segment start to every exact ``(grid level, λ)`` selecting it.
 
     λ is the numerical penalty applied to volatility-normalized fitting error,
@@ -75,8 +78,7 @@ def candidate_provenance(costs: LinearCosts, sigma: float, config: TrendConfig) 
     n, minimum = costs.n, config.min_segment_length
     if n < minimum:
         return {}
-    full_cost = float(costs.fit(0, n)[0]) / sigma ** 2
-    penalties = _penalties(n, full_cost, config)
+    penalties = np.asarray(penalty_grid(config)) if penalties is None else penalties
     # Avoid allocating a second dense N x N interval-cost matrix.
     dp = np.full((n + 1, len(penalties)), np.inf)
     dp[0] = -penalties
@@ -106,10 +108,10 @@ def candidate_starts(costs: LinearCosts, sigma: float, config: TrendConfig) -> l
 class PrefixSegmentations:
     """Reuse exact segmentation costs across independently analyzed prefixes.
 
-    A single penalty-based DP cannot be reused directly: volatility and the
-    penalty grid both change with the endpoint. Instead, retain the minimum
+    A single penalty-based DP cannot be reused directly: volatility changes
+    with the endpoint. Instead, retain the minimum
     *unscaled* fitting error for each prefix and segment count. A query then
-    applies that prefix's own volatility and penalty grid to those costs.
+    applies that prefix's own volatility and the shared fixed λ grid to those costs.
 
     ``candidate_starts(prefix_length)`` uses the exclusive prefix length, so a
     query of 20 analyzes observations 0 through 19. Every possible boundary is
@@ -120,9 +122,10 @@ class PrefixSegmentations:
     most 502,251 states, rather than one independent DP for every endpoint.
     """
 
-    def __init__(self, values: np.ndarray, config: TrendConfig):
+    def __init__(self, values: np.ndarray, config: TrendConfig, *, penalties: np.ndarray | None = None):
         self.values = np.asarray(values, dtype=float)
         self.config = config
+        self._penalties = np.asarray(penalty_grid(config)) if penalties is None else penalties
         self.n = len(self.values)
         if self.n > config.max_history:
             raise ValueError("PrefixSegmentations requires at most max_history observations")
@@ -168,8 +171,7 @@ class PrefixSegmentations:
         from .scoring import volatility
 
         sigma = volatility(self.values[:prefix_length])
-        full_cost = float(self.costs.fit(0, prefix_length)[0]) / sigma ** 2
-        penalties = _penalties(prefix_length, full_cost, self.config)
+        penalties = self._penalties
         self._extend(prefix_length)
         counts = np.arange(1, prefix_length // self.config.min_segment_length + 1)
         # Omit the same final penalty as the one-shot DP's comparison. This

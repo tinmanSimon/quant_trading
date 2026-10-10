@@ -9,12 +9,9 @@ import polars as pl
 
 from .models import AnalysisResult, CandidateDiagnostic, Trend, TrendConfig
 from .scoring import Scorer, SharedIntervals, volatility
-from .segmentation import LinearCosts, PenaltyProvenance, PrefixSegmentations, candidate_provenance
+from .segmentation import LinearCosts, PenaltyProvenance, PrefixSegmentations, candidate_provenance, penalty_grid
 from .tails import TailInfo, diagnose
 from .validation import prepare
-
-
-MAX_ROLLING_WORK = 64_000_000
 
 
 def analyze_current(frame: pl.DataFrame, *, timestamp_col: str = "timestamp", price_col: str = "close",
@@ -143,15 +140,9 @@ def analyze_history(frame: pl.DataFrame, *, timestamp_col: str = "timestamp", pr
                        config=config, analysis_mode="history")
     if not total:
         return AnalysisResult((), (), "insufficient_data", **result_args)
-    rolling_endpoints = max(0, n - config.max_history)
-    if rolling_endpoints * config.max_history ** 2 > MAX_ROLLING_WORK:
-        raise ValueError(
-            "Historical analysis exceeds the exact rolling-work budget. "
-            "Narrow the date range or lower Maximum lookback per endpoint; "
-            "no historical endpoints have been skipped."
-        )
     initial_length = min(n, config.max_history)
-    partitions = PrefixSegmentations(values[:initial_length], config)
+    penalties = np.asarray(penalty_grid(config))
+    partitions = PrefixSegmentations(values[:initial_length], config, penalties=penalties)
     initial_costs = LinearCosts(values[:initial_length])
     shared = SharedIntervals(values, config.max_history)
     trends, diagnostics = [], []
@@ -164,7 +155,7 @@ def analyze_history(frame: pl.DataFrame, *, timestamp_col: str = "timestamp", pr
             # Exact bounded-window fallback. Short configured lookbacks remain
             # inexpensive on large datasets; no endpoints are subsampled.
             costs = LinearCosts(values[offset:end])
-            provenance = candidate_provenance(costs, volatility(values[offset:end]), config)
+            provenance = candidate_provenance(costs, volatility(values[offset:end]), config, penalties=penalties)
             shared.discard_before(offset)
         snapshot = _describe(times[offset:end], values[offset:end], offset, config,
                              costs=costs, provenance=provenance, shared=shared)

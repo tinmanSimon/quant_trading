@@ -6,7 +6,21 @@ from types import SimpleNamespace
 
 import pytest
 
-from dashboard.trend_selection import select_trends
+from dashboard.trend_selection import filter_trends_by_lambda, select_trends
+
+
+def test_lambda_filter_matches_any_provenance_and_preserves_original_intervals():
+    first = SimpleNamespace(lambda_values=(.1, .2))
+    second = SimpleNamespace(lambda_values=(.3,))
+    tail = SimpleNamespace(lambda_values=())
+    archive = (first, second, tail)
+    assert filter_trends_by_lambda(archive) == archive
+    assert filter_trends_by_lambda(archive, {.2}) == (first,)
+    assert filter_trends_by_lambda(archive, {.2, .3}) == (first, second)
+    assert filter_trends_by_lambda(archive, set()) == ()
+    assert filter_trends_by_lambda(archive, set(), include_without_lambda=True) == (tail,)
+    assert filter_trends_by_lambda(archive, {.1}, include_without_lambda=True) == (first, tail)
+    assert filter_trends_by_lambda(archive, {.2})[0] is first
 
 
 def trend(start, end, clarity=1.0, direction=1, *, trend_id=None, lambda_levels=(0,)):

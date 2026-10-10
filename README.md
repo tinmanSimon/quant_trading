@@ -120,6 +120,18 @@ analysis. The table retains every accepted
 interval with **On chart** or **Redundant** status and a reference to its
 representative. Rejected candidates are **Uncertain** in the diagnostics table,
 with the reason they failed acceptance.
+After analysis, **Show redundant intervals** adds the redundant intervals to the
+chart immediately without recomputing the analysis. It is off by default. The
+table keeps their **Redundant** classification and representative reference,
+while **On chart** reflects their current visibility. Uncertain candidates are
+not plotted by this option.
+**Show all λ values** is enabled by default. Turn it off and choose one or more
+**λ values** to show only intervals discovered at any selected penalty. An empty
+selection hides all trend lines; tail-derived intervals can be selected separately
+as **No segmentation λ (tail-derived)**. The filter applies after redundancy
+selection and never reruns analysis or changes line colors. All results remain
+in the table, with **On chart** reflecting visibility and **Filtered out** marking
+hidden non-redundant intervals.
 
 Intervals carry all numerical **lambda (λ)** penalties that discovered their
 boundaries, together with their penalty-grid levels. A single boundary can be
@@ -128,8 +140,18 @@ determined by its smallest λ, and hover shows all its λ values alongside the
 interval, direction, clarity, rate, robustness, and tail diagnosis. Colors stay
 consistent when zooming or panning. A candidate discovered only by tail diagnosis
 is labeled as such and uses a separate neutral style, because it has no
-segmentation λ. Each endpoint uses its own penalty grid and volatility, so
-similar intervals at successive endpoints need not have identical λ values.
+segmentation λ. Every endpoint uses the same fixed numerical λ grid, built once
+from configuration before historical analysis. **Starting λ** (stored as
+`penalty_multiplier` for compatibility) is the first value, **Penalty grid step**
+sets the multiplier between values to `2 ** step`, and **Number of λ levels**
+sets the grid size (1–256). Defaults are starting λ **1**, step **1**, and **20**
+levels: 1, 2, 4, ..., 524288. For example, starting λ 2.1, step 3, and 4 levels
+produce 2.1, 16.8, 134.4, 1075.2 at every endpoint. **Fixed λ grid preview** shows
+the configured values. No price data, endpoint bar count, or future observations
+determine the grid, and it is not shortened when multiple levels choose the
+same interval. The configured largest λ does not guarantee a no-split solution;
+increase the level count if you want to test larger penalties. Volatility
+normalization still uses each endpoint's own available data.
 Adding observations can change which archived intervals represent nearby
 results on the chart, but cannot change an earlier interval's metrics or λ
 provenance when its inputs and configuration are unchanged.
@@ -145,6 +167,11 @@ Older saved bar-based redundancy settings load with the new 5%/AND defaults
 and a migration notice; other saved settings are preserved. The old file remains
 unchanged until **Apply and analyze** saves the new format. Explicit percentage
 and boundary-rule values take precedence if a file contains both formats.
+Older penalty settings retain their numeric multiplier and grid step; the
+multiplier now means **Starting λ**, and missing level counts default to 20.
+A migration notice explains this change; review the grid preview and apply to
+save the new format. Existing analysis caches are invalidated by the algorithm
+version change.
 
 Each endpoint uses at most **Maximum lookback per endpoint (bars)** preceding
 observations, including that endpoint (default and maximum: 2,000). At least
@@ -152,10 +179,10 @@ eight observations are required for a segment. This limits each calculation's
 lookback, not the historical endpoints reported: successful analysis covers
 the entire selected history once enough observations are available. Historical
 analysis costs more than a single snapshot; progress is shown, results are
-cached, and no endpoints are silently skipped. Large rolling-window requests
-that exceed the exact-computation work budget fail before analysis with a
-request to narrow the date range or lower the per-endpoint lookback; they never
-return a silently shortened history. Bars with potentially unfinished periods are
+cached, and no endpoints are silently skipped. There is no rolling-work budget
+cutoff on the total input length. Large requests are allowed to run; repeated
+segmentation after the lookback window starts sliding can take substantially
+longer. The per-endpoint lookback remains capped at 2,000 bars. Bars with potentially unfinished periods are
 excluded: intraday bars wait their nominal duration; calendar bars wait until
 their labelled period ends in America/New_York. This conservative policy can
 delay inclusion of shortened session bars or an already closed daily session.

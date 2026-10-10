@@ -14,7 +14,7 @@ from time import monotonic
 import polars as pl
 import streamlit as st
 
-from trend_analysis import ALGORITHM_VERSION, TrendConfig, analyze
+from trend_analysis import ALGORITHM_VERSION, TrendConfig, analyze, penalty_grid
 from dashboard.trend_selection import TrendSelection, select_trends
 from dashboard.trend_settings import load_trend_settings, save_trend_settings
 
@@ -27,8 +27,9 @@ _CACHE_LIMIT = 4
 _DISCOVERY = (
     ("max_history", "Maximum lookback per endpoint (bars)", "At each historical endpoint, use at most this many preceding source bars, including that endpoint. Every eligible endpoint in the selected interval is analyzed. This does not limit total coverage; the prototype supports lookbacks up to 2,000 bars.", 8, 2000, 100),
     ("min_segment_length", "Minimum segment length (bars)", "Shorter candidate segments are excluded.", 8, 2000, 1),
-    ("penalty_multiplier", "Segmentation penalty multiplier", "Higher penalties favor fewer boundaries and broader structures. Must be positive.", 0.0, None, 0.1),
-    ("penalty_grid_step", "Penalty grid step", "Smaller steps sample more penalty levels when discovering broad and local intervals.", 0.25, 4.0, 0.25),
+    ("penalty_multiplier", "Starting λ", "First numerical penalty in the fixed grid shared by every endpoint. Stored as penalty_multiplier for compatibility. Must be positive.", 0.0, None, 0.1),
+    ("penalty_grid_step", "Penalty grid step", "Each next λ is multiplied by 2 raised to this value. A step of 3 multiplies by 8. The same grid is used at every endpoint.", 0.25, 4.0, 0.25),
+    ("penalty_grid_levels", "Number of λ levels", "Number of fixed penalties tested at every endpoint. More levels extend the grid toward larger penalties; prices and history length never change this grid.", 1, 256, 1),
 )
 _ACCEPTANCE = (
     ("clarity_threshold", "Minimum clarity", "Required combined directional evidence; this is not a probability.", 0.0, 1.0, 0.05),
@@ -198,6 +199,16 @@ def render_trend_controls(frame: pl.DataFrame, *, timeframe: str, identity: obje
                 _controls(fields, values)
         submitted = st.form_submit_button("Apply and analyze", type="primary")
 
+    with st.expander("Fixed λ grid preview"):
+        try:
+            preview = penalty_grid(TrendConfig.from_dict(values))
+        except (TypeError, ValueError):
+            st.caption("Enter valid settings and apply them to preview the fixed λ grid.")
+        else:
+            st.caption("Starting λ × 2^(level × grid step), with level starting at 0. "
+                       "The form values below take effect when applied; every endpoint uses the same grid.")
+            st.code(", ".join(f"{value:.12g}" for value in preview), language=None)
+
     if submitted:
         try:
             config = TrendConfig.from_dict(values)
@@ -248,7 +259,8 @@ def _with_lambda_labels(table: pl.DataFrame) -> pl.DataFrame:
     return table.with_columns(pl.Series("lambda_label", labels, dtype=pl.String))
 
 
-def render_trend_results(result, *, selection: TrendSelection | None = None) -> None:
+def render_trend_results(result, *, selection: TrendSelection | None = None,
+                         show_redundant: bool = False, chart_trend_ids: set[str] | None = None) -> None:
     """Distinguish chart intervals, retained redundancies, and uncertain candidates."""
     if result is None:
         return
@@ -257,7 +269,9 @@ def render_trend_results(result, *, selection: TrendSelection | None = None) -> 
                                   redundancy_percentage=result.config.redundancy_percentage,
                                   redundancy_boundary_rule=result.config.redundancy_boundary_rule,
                                   redundancy_min_bars=result.config.redundancy_min_bars)
-    chart_trend_ids = {trend.trend_id for trend in selection.chart_trends}
+    eligible_ids = {trend.trend_id for trend in (result.trends if show_redundant else selection.chart_trends)}
+    if chart_trend_ids is None:
+        chart_trend_ids = eligible_ids
     diagnostics = result.diagnostics_frame()
     uncertain = diagnostics.filter(~pl.col("accepted")) if not diagnostics.is_empty() else diagnostics
     st.subheader("Trend analysis")
@@ -271,16 +285,24 @@ def render_trend_results(result, *, selection: TrendSelection | None = None) -> 
                    "that earlier result. Start is an estimated onset, not a first-recognition date.")
     boundary_match = ("both start and end differences are" if result.config.redundancy_boundary_rule == "and"
                       else "either the start or end difference is")
-    st.caption(f"{len(selection.chart_trends):,} intervals on chart; {len(selection.redundant_to):,} redundant intervals; "
+    display_description = ("Intervals are classified as redundant when" if show_redundant
+                           else "Overlapping intervals are shown unless")
+    st.caption(f"{len(chart_trend_ids):,} intervals on chart; {len(selection.redundant_to):,} redundant intervals; "
                f"{len(uncertain):,} uncertain candidates. All {len(result.trends):,} accepted intervals remain in the table. "
-               f"Overlapping intervals are shown unless {boundary_match} within the larger of "
+               f"{display_description} {boundary_match} within the larger of "
                f"{result.config.redundancy_min_bars} bars and "
                f"{result.config.redundancy_percentage:g}% of the shorter interval's inclusive bar count "
                "relative to an already selected same-direction representative. Selection proceeds from highest "
                "to lowest clarity. Display selection may change as history grows; "
                "the underlying historical results stay available here.")
+    if show_redundant:
+        st.caption("Redundant intervals are eligible for display, subject to the λ filter. They keep their Redundant status "
+                   "and representative reference; On chart indicates current visibility.")
+    if chart_trend_ids != eligible_ids:
+        st.caption("The λ filter hides nonmatching lines only. All interval results remain in the table; "
+                   "On chart reflects current visibility.")
     st.caption("Line color identifies the smallest numeric λ that discovered the interval. Hover and table list "
-               "every λ; values depend on the endpoint lookback. Tail-derived intervals use a gray dashed line "
+               "every λ; every endpoint uses the same configured grid. Tail-derived intervals use a gray dashed line "
                "and have no λ.")
     if result.status == "insufficient_data":
         st.info("Insufficient completed bars for trend analysis with these settings.")
@@ -293,7 +315,8 @@ def render_trend_results(result, *, selection: TrendSelection | None = None) -> 
         ids = table["trend_id"].to_list()
         table = table.with_columns(
             pl.col("trend_id").is_in(sorted(chart_trend_ids)).alias("on_chart"),
-            pl.Series("status", ["Redundant" if item in selection.redundant_to else "On chart" for item in ids]),
+            pl.Series("status", ["Redundant" if item in selection.redundant_to else
+                                 "On chart" if item in chart_trend_ids else "Filtered out" for item in ids]),
             pl.Series("redundant_to", [selection.redundant_to.get(item) for item in ids], dtype=pl.String),
         )
         leading = ("trend_id", "status", "redundant_to", "start_index", "end_index", "direction",

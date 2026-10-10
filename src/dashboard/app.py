@@ -15,7 +15,7 @@ from dashboard.chart_component import render_series_chart
 from dashboard.deletion import deletion_page
 from dashboard.strategy_controls import strategy_specs
 from dashboard.trend_input import completed_prefix
-from dashboard.trend_selection import select_trends
+from dashboard.trend_selection import filter_trends_by_lambda, select_trends
 from dashboard.trends import render_trend_controls, render_trend_results
 from research import PreflightError, Research, ResearchError
 from research.backtesting import ExecutionSettings
@@ -202,8 +202,36 @@ def _data_page(research: Research):
                       tuple(item.to_json() for item in sorted(selected, key=lambda item: item.dataset_id)))
     # A stable container prevents conditional controls from moving the chart's
     # Streamlit element path, unmounting it, and losing browser-local navigation.
+    show_redundant = False
+    selected_lambdas = None
+    include_without_lambda = False
     with st.container():
         trend_result = render_trend_controls(trend_frame, timeframe=identity[1], identity=trend_identity)
+        if trend_result is not None:
+            show_redundant = st.checkbox(
+                "Show redundant intervals", key="show-redundant-trends",
+                help="Show all accepted intervals, including redundancies. Uses the existing analysis; "
+                     "redundant intervals keep their classification in the table.",
+            )
+            show_all_lambdas = st.checkbox("Show all λ values", value=True, key="show-all-trend-lambdas")
+            if not show_all_lambdas:
+                no_lambda = "No segmentation λ (tail-derived)"
+                options = sorted({value for trend in trend_result.trends for value in trend.lambda_values})
+                if any(not trend.lambda_values for trend in trend_result.trends):
+                    options.append(no_lambda)
+                filter_key = "selected-trend-lambdas"
+                if filter_key in st.session_state:
+                    st.session_state[filter_key] = [value for value in st.session_state[filter_key]
+                                                    if value in options]
+                selected = st.multiselect(
+                    "λ values", options=options, key=filter_key,
+                    format_func=lambda value: value if isinstance(value, str) else f"λ = {value!r}",
+                    help="Match any λ that discovered an interval. Select nothing to hide all lines. "
+                         "Redundant matches appear only when Show redundant intervals is enabled. "
+                         "Line colors keep their original smallest λ.",
+                )
+                selected_lambdas = {value for value in selected if value != no_lambda}
+                include_without_lambda = no_lambda in selected
         if st.session_state.get("analyze-trends") and trend_frame.height < series.total_count:
             st.caption(f"Trend analysis excludes {series.total_count - trend_frame.height} potentially unfinished bars. "
                        "Intraday bars wait their full nominal duration; calendar bars wait until their labelled "
@@ -217,6 +245,10 @@ def _data_page(research: Research):
         redundancy_min_bars=trend_result.config.redundancy_min_bars,
     ) if trend_result is not None else None)
     chart_trends = trend_selection.chart_trends if trend_selection is not None else ()
+    if show_redundant:
+        chart_trends = trend_result.trends
+    chart_trends = filter_trends_by_lambda(chart_trends, selected_lambdas,
+                                          include_without_lambda=include_without_lambda)
     trend_signature = repr((chart_id, chart_trends))
     if st.session_state.get("trend-overlay-signature") != trend_signature:
         st.session_state["trend-overlay-signature"] = trend_signature
@@ -226,7 +258,8 @@ def _data_page(research: Research):
                         trends=chart_trends,
                         overlay_revision=st.session_state.get("trend-overlay-revision", 0))
     if trend_result is not None:
-        render_trend_results(trend_result, selection=trend_selection)
+        render_trend_results(trend_result, selection=trend_selection, show_redundant=show_redundant,
+                            chart_trend_ids={trend.trend_id for trend in chart_trends})
     if st.checkbox("Show original bars", key="browse-show-original-bars"):
         pages = (series.total_count + 499) // 500
         page = st.number_input("Original bar page", min_value=1, max_value=pages, value=pages,

@@ -85,12 +85,17 @@ def test_insufficient_data_has_no_historical_records():
     assert not result.trends and not result.diagnostics
 
 
-def test_excessive_rolling_work_is_rejected_before_any_partial_analysis(monkeypatch):
-    import trend_analysis.api as api
-
-    def unexpected(*args, **kwargs):
-        raise AssertionError("Segmentation started before the workload check")
-
-    monkeypatch.setattr(api, "PrefixSegmentations", unexpected)
-    with pytest.raises(ValueError, match="rolling-work budget"):
-        analyze(prices(np.zeros(2017)))
+def test_history_above_former_rolling_work_budget_analyzes_every_eligible_endpoint():
+    # Exercise the real 2,000-bar rolling window beyond the former 2,017-bar
+    # cutoff. One minimum-length candidate per window keeps this test cheap.
+    frame = prices(np.zeros(2025))
+    config = TrendConfig(max_history=2000, min_segment_length=2000)
+    updates = []
+    result = analyze(frame, config=config, progress=lambda done, total: updates.append((done, total)))
+    assert result.status == "no_clear_trend"
+    assert result.analysis_start == frame["timestamp"][0]
+    assert result.analysis_end == frame["timestamp"][-1]
+    assert [(d.start_index, d.end_index) for d in result.diagnostics] == [
+        (end - 1999, end) for end in range(1999, 2025)
+    ]
+    assert updates == [(done, 26) for done in range(27)]

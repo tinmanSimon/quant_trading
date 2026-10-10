@@ -62,6 +62,23 @@ def test_explicit_percentage_settings_take_precedence_over_retired_bar_setting(t
     assert "7.5%" in loaded.warning and "Either boundary (OR)" in loaded.warning
 
 
+def test_old_multiplier_migration_explains_new_starting_lambda_without_writing(tmp_path):
+    path = tmp_path / "trend_config.json"
+    payload = json.dumps({"schema_version": SCHEMA_VERSION,
+                          "config": {"penalty_multiplier": 2.1, "penalty_grid_step": 3,
+                                     "clarity_threshold": .8}})
+    path.write_text(payload)
+    loaded = load_trend_settings(path)
+    assert loaded.config.penalty_multiplier == 2.1
+    assert loaded.config.penalty_grid_step == 3
+    assert loaded.config.penalty_grid_levels == 20
+    assert loaded.config.clarity_threshold == .8
+    assert "Starting λ" in loaded.warning and "20 levels" in loaded.warning
+    assert path.read_text() == payload
+    save_trend_settings(loaded.config, path)
+    assert load_trend_settings(path).warning is None
+
+
 @pytest.mark.parametrize("payload", [
     "{broken", "[]", '{"schema_version":999,"config":{}}',
     '{"schema_version":true,"config":{}}',

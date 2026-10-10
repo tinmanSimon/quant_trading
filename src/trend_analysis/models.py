@@ -8,7 +8,7 @@ from typing import Any, Mapping
 import polars as pl
 
 
-ALGORITHM_VERSION = "3.2.0"
+ALGORITHM_VERSION = "4.0.0"
 Timestamp = datetime | date
 
 
@@ -18,6 +18,7 @@ class TrendConfig:
     min_segment_length: int = 8
     penalty_multiplier: float = 1.0
     penalty_grid_step: float = 1.0
+    penalty_grid_levels: int = 20
     weight_ols: float = 0.25
     weight_robust: float = 0.20
     weight_ordering: float = 0.35
@@ -53,7 +54,7 @@ class TrendConfig:
             value = getattr(self, field.name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
                 raise ValueError(f"{field.name} must be a finite number")
-        for name in ("max_history", "min_segment_length", "min_tail_length", "redundancy_min_bars"):
+        for name in ("max_history", "min_segment_length", "min_tail_length", "redundancy_min_bars", "penalty_grid_levels"):
             if not isinstance(getattr(self, name), int):
                 raise ValueError(f"{name} must be an integer")
         if not 8 <= self.min_segment_length <= self.max_history <= 2000:
@@ -64,6 +65,8 @@ class TrendConfig:
             raise ValueError("penalty_multiplier must be positive")
         if not 0.25 <= self.penalty_grid_step <= 4:
             raise ValueError("penalty_grid_step must be between 0.25 and 4")
+        if not 1 <= self.penalty_grid_levels <= 256:
+            raise ValueError("penalty_grid_levels must be between 1 and 256")
         if any(value < 0 for value in self.weights) or not math.isclose(sum(self.weights), 1, abs_tol=1e-8):
             raise ValueError("Method weights must be nonnegative and sum to one")
         for name in ("clarity_threshold", "boundary_fraction", "boundary_score_threshold",

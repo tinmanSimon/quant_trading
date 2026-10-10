@@ -98,6 +98,7 @@ def test_restart_and_widget_removal_preserve_applied_config(trend_page):
     app, source, script = trend_page
     _enable(app)
     _element(app.number_input, "Maximum lookback per endpoint (bars)").set_value(500)
+    _element(app.number_input, "Number of λ levels").set_value(4)
     _element(app.number_input, "Minimum redundancy resolution (bars)").set_value(9)
     _element(app.number_input, "Redundancy tolerance (%)").set_value(12)
     _element(app.selectbox, "Boundary matching rule").select("or")
@@ -114,6 +115,7 @@ def test_restart_and_widget_removal_preserve_applied_config(trend_page):
     fresh = AppTest.from_string(script).run()
     _enable(fresh)
     assert _element(fresh.number_input, "Maximum lookback per endpoint (bars)").value == 500
+    assert _element(fresh.number_input, "Number of λ levels").value == 4
     assert _element(fresh.number_input, "Minimum redundancy resolution (bars)").value == 9
     assert load_trend_settings(source.path).config.redundancy_min_bars == 9
     assert _element(fresh.number_input, "Redundancy tolerance (%)").value == 12
@@ -121,6 +123,22 @@ def test_restart_and_widget_removal_preserve_applied_config(trend_page):
     assert load_trend_settings(source.path).config.redundancy_boundary_rule == "or"
     assert fresh.session_state["_test_result"] is None
     assert len(source.calls) == 1
+
+
+def test_fixed_grid_controls_preview_and_persistence(trend_page):
+    app, source, _ = trend_page
+    _enable(app)
+    assert _element(app.number_input, "Number of λ levels").value == 20
+    _element(app.number_input, "Starting λ").set_value(2.1)
+    _element(app.number_input, "Penalty grid step").set_value(3.0)
+    _element(app.number_input, "Number of λ levels").set_value(4)
+    _apply(app)
+    assert any(item.value == "2.1, 16.8, 134.4, 1075.2" for item in app.code)
+    saved = load_trend_settings(source.path).config
+    assert saved.penalty_multiplier == 2.1
+    assert saved.penalty_grid_step == 3
+    assert saved.penalty_grid_levels == 4
+    assert source.calls[-1][2] == saved
 
 
 def test_page_switch_restores_percentage_and_boundary_rule(trend_page):
@@ -245,7 +263,7 @@ def test_integer_json_values_can_populate_float_widgets(trend_page):
     save_trend_settings(TrendConfig(penalty_multiplier=2, redundancy_percentage=12), source.path)
     fresh = AppTest.from_string(script).run()
     _enable(fresh)
-    assert _element(fresh.number_input, "Segmentation penalty multiplier").value == 2.0
+    assert _element(fresh.number_input, "Starting λ").value == 2.0
     assert _element(fresh.number_input, "Redundancy tolerance (%)").value == 12.0
 
 

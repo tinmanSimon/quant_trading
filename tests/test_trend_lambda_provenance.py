@@ -38,17 +38,12 @@ def test_each_reported_lambda_selects_the_boundary_in_exhaustive_partitions():
                 fitted = np.polyval(np.polyfit(x, values[start:end], 1), x)
                 error += float(np.square(values[start:end] - fitted).sum())
             partitions.append((error / sigma ** 2, boundary_count, edges[-2]))
-    full = next(error for error, count, _ in partitions if count == 0)
-    penalty = config.penalty_multiplier * np.log(len(values)) * 2 ** -4
+    penalty = config.penalty_multiplier
     expected = {}
-    level = 0
-    while True:
+    for level in range(config.penalty_grid_levels):
         winner = min((error + penalty * count, start) for error, count, start in partitions)[1]
         expected.setdefault(winner, []).append((level, penalty))
-        if penalty > full:
-            break
         penalty *= 2 ** config.penalty_grid_step
-        level += 1
     actual = candidate_provenance(LinearCosts(values), sigma, config)
     assert actual == {start: tuple(entries) for start, entries in expected.items()}
     assert candidate_starts(LinearCosts(values), sigma, config) == sorted(actual)
@@ -110,7 +105,7 @@ def test_nearby_same_direction_candidates_are_all_retained_regardless_of_display
     config = TrendConfig()
     result = analyze_current(frame, config=config)
     starts = {trend.start_index for trend in result.trends}
-    assert {83, 85, 87, 88, 90, 91, 92} <= starts
+    assert {83, 85, 87, 88, 90, 92} <= starts
     assert all(d.accepted for d in result.diagnostics)
     assert all(not d.rejection_reason for d in result.diagnostics)
     # Legacy duration-ratio suppression and the new display-only threshold

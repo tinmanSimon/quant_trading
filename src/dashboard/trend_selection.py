@@ -18,6 +18,16 @@ class TrendSelection:
     redundant_to: dict[str, str]
 
 
+def filter_trends_by_lambda(trends, selected_lambdas=None, *, include_without_lambda=False):
+    """Filter original intervals by any discovery λ; None means show all."""
+    if selected_lambdas is None:
+        return tuple(trends)
+    selected = set(selected_lambdas)
+    return tuple(trend for trend in trends if
+                 selected.intersection(trend.lambda_values)
+                 or (include_without_lambda and not trend.lambda_values))
+
+
 def select_trends(
     trends, *, redundancy_percentage: float = 5.0,
     redundancy_boundary_rule: str = "and",

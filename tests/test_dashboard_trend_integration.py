@@ -13,6 +13,16 @@ from research import Research
 def test_market_page_applies_saved_settings_and_hides_stale_results(tmp_path, monkeypatch):
     from dashboard import app as dashboard
     from dashboard import trend_settings
+    from dashboard import trends as trend_ui
+
+    analysis_calls = []
+    analyze = trend_ui.analyze
+
+    def capture_analysis(*args, **kwargs):
+        analysis_calls.append(kwargs["config"])
+        return analyze(*args, **kwargs)
+
+    monkeypatch.setattr(trend_ui, "analyze", capture_analysis)
 
     monkeypatch.setattr(trend_settings, "DEFAULT_SETTINGS_PATH", tmp_path / "trend_config.json")
     research = Research(tmp_path / "data", tmp_path / "runs")
@@ -67,6 +77,40 @@ def test_market_page_applies_saved_settings_and_hides_stale_results(tmp_path, mo
     display_columns = ["on_chart", "status", "redundant_to"]
     assert or_results.drop(columns=display_columns).equals(results.drop(columns=display_columns))
     assert trend_settings.load_trend_settings(tmp_path / "trend_config.json").config.redundancy_boundary_rule == "or"
+    assert not app.checkbox(key="show-redundant-trends").value
+    calls_before_toggle = len(analysis_calls)
+    original_signature = app.session_state["trend-overlay-signature"]
+    original_revision = app.session_state["trend-overlay-revision"]
+    app.checkbox(key="show-redundant-trends").check().run()
+    assert not app.exception and not app.error
+    all_results = next(table.value for table in app.dataframe if "trend_id" in table.value.columns)
+    assert all_results["on_chart"].all()
+    assert len(rendered_trends[-1]) == len(all_results)
+    assert {trend.trend_id for trend in rendered_trends[-1]} == set(all_results["trend_id"])
+    assert all_results.drop(columns="on_chart").equals(or_results.drop(columns="on_chart"))
+    assert len(analysis_calls) == calls_before_toggle
+    assert app.session_state["trend-overlay-revision"] > original_revision
+    all_trends = rendered_trends[-1]
+    assert app.checkbox(key="show-all-trend-lambdas").value
+    app.checkbox(key="show-all-trend-lambdas").uncheck().run()
+    assert not rendered_trends[-1]
+    selected_lambda = all_trends[0].lambda_values[0]
+    app.multiselect(key="selected-trend-lambdas").set_value([selected_lambda]).run()
+    assert not app.exception and not app.error
+    expected_ids = {trend.trend_id for trend in all_trends if selected_lambda in trend.lambda_values}
+    assert {trend.trend_id for trend in rendered_trends[-1]} == expected_ids
+    filtered = next(table.value for table in app.dataframe if "trend_id" in table.value.columns)
+    assert set(filtered.loc[filtered["on_chart"], "trend_id"]) == expected_ids
+    assert len(filtered) == len(all_results)
+    assert filtered["redundant_to"].equals(all_results["redundant_to"])
+    assert len(analysis_calls) == calls_before_toggle
+    app.checkbox(key="show-all-trend-lambdas").check().run()
+    assert rendered_trends[-1] == all_trends
+    assert len(analysis_calls) == calls_before_toggle
+    app.checkbox(key="show-redundant-trends").uncheck().run()
+    assert len(rendered_trends[-1]) == 1
+    assert app.session_state["trend-overlay-signature"] == original_signature
+    assert len(analysis_calls) == calls_before_toggle
     revision = app.session_state["trend-overlay-revision"]
     signature = app.session_state["trend-overlay-signature"]
     assert "Trend(" in signature or "trend_id" in signature

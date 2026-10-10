@@ -51,6 +51,13 @@ def load_trend_settings(path: Path | str | None = None) -> LoadedTrendSettings:
             f"Using {config.redundancy_percentage:g}% and {rule}; other saved settings are preserved. "
             "Apply and analyze to save the new format. The saved file has not been changed."
         )
+    if "penalty_multiplier" in document["config"] and "penalty_grid_levels" not in document["config"]:
+        grid_notice = (
+            "Segmentation now uses a fixed λ grid. The saved penalty multiplier is used directly as Starting λ "
+            f"({config.penalty_multiplier:g}), with {config.penalty_grid_levels} levels. "
+            "Review the fixed λ grid preview and apply to save the new format."
+        )
+        warning = f"{warning} {grid_notice}" if warning else grid_notice
     return LoadedTrendSettings(config, warning)
 
 

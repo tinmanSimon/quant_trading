@@ -186,10 +186,9 @@ def test_all_boundary_segmentation_matches_exhaustive_partition_costs():
     costs = LinearCosts(values)
     config = TrendConfig()
     sigma = volatility(values)
-    full = float(costs.fit(0, len(values))[0]) / sigma ** 2
-    penalty = 2. ** -4 * np.log(len(values))
+    penalty = config.penalty_multiplier
     expected = set()
-    while True:
+    for _ in range(config.penalty_grid_levels):
         choices = []
         for boundary_count in range(3):
             for internal in combinations(range(8, len(values) - 7), boundary_count):
@@ -204,9 +203,7 @@ def test_all_boundary_segmentation_matches_exhaustive_partition_costs():
                     error += float(np.square(values[start:end] - np.polyval(coefficients, x)).sum())
                 choices.append((error / sigma ** 2 + penalty * boundary_count, edges[-2]))
         expected.add(min(choices)[1])
-        if penalty > full:
-            break
-        penalty *= 2
+        penalty *= 2 ** config.penalty_grid_step
     assert candidate_starts(costs, sigma, config) == sorted(expected)
 
 
@@ -226,8 +223,8 @@ def test_maximum_history_analysis_runs_exactly_within_interactive_budget():
 
 def test_extreme_penalty_settings_fail_before_allocating_unbounded_work():
     frame = prices(np.arange(40) ** 2 * .001)
-    with pytest.raises(ValueError, match="256 levels"):
-        analyze(frame, config=TrendConfig(penalty_multiplier=1e-300, penalty_grid_step=.25))
+    with pytest.raises(ValueError, match="penalty_grid_levels"):
+        analyze(frame, config=TrendConfig(penalty_grid_levels=257))
     with pytest.raises(ValueError, match="numerically supported"):
         analyze(frame, config=TrendConfig(penalty_multiplier=1e308))
 

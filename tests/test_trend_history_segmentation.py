@@ -71,15 +71,9 @@ def test_prefix_lengths_and_history_limit_are_validated():
         PrefixSegmentations(np.arange(21.), TrendConfig(max_history=20))
 
 
-@pytest.mark.parametrize("config, message", [
-    (TrendConfig(penalty_multiplier=1e-300, penalty_grid_step=.25), "256 levels"),
-    (TrendConfig(penalty_multiplier=1e308), "numerically supported"),
-])
-def test_extreme_penalty_grid_fails_before_expanding_history(config, message):
-    shared = PrefixSegmentations(np.arange(40) ** 2 * .001, config)
-    with pytest.raises(ValueError, match=message):
-        shared.candidate_starts(40)
-    assert shared._computed_length == config.min_segment_length - 1
+def test_overflowing_penalty_grid_fails_before_allocating_history():
+    with pytest.raises(ValueError, match="numerically supported"):
+        PrefixSegmentations(np.arange(40) ** 2 * .001, TrendConfig(penalty_multiplier=1e308))
 
 
 def test_all_two_thousand_endpoints_share_bounded_work():

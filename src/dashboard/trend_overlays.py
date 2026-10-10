@@ -18,9 +18,8 @@ MAX_TREND_POINTS = 768
 def lambda_color(value):
     """Stable numeric-penalty color, independent of direction and result order.
 
-    Actual penalties vary with the endpoint's lookback. Hash the exact float,
-    rather than its grid position or rounded label, so the color describes the
-    numeric lambda used by that interval.
+    Hash the exact float rather than its grid position or rounded label, so the
+    same numerical lambda keeps its color across endpoints and configurations.
     """
     digest = blake2b(float(value).hex().encode("ascii"), digest_size=8).digest()
     hue = int.from_bytes(digest[:6], "big") / (2**48) * 360
