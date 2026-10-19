@@ -20,6 +20,14 @@ class ScalePrices(BaseProcessor):
     factor: float
     name: ClassVar[str] = "scale_prices"
     version: ClassVar[str] = "1"
+    label: ClassVar[str] = "Scale prices"
+    description: ClassVar[str] = "Multiply OHLC prices by a positive factor; preserve volume and timeframe."
+    causal: ClassVar[bool] = True
+    price_basis: ClassVar[str] = "transformed"
+    config_schema: ClassVar[dict] = {"properties": {
+        "factor": {"title": "Scaling factor", "exclusiveMinimum": 0,
+                   "description": "Multiplier applied to open, high, low, and close."},
+    }}
 
     def __post_init__(self) -> None:
         try:

@@ -74,6 +74,16 @@ class ResampleOHLCV(BaseProcessor):
     target_timeframe: str = "1d"
     name: ClassVar[str] = "resample_ohlcv"
     version: ClassVar[str] = "1"
+    label: ClassVar[str] = "Resample OHLCV"
+    description: ClassVar[str] = "Aggregate hourly bars into daily bars using explicit trading sessions."
+    causal: ClassVar[bool] = True
+    config_schema: ClassVar[dict] = {"properties": {
+        "sessions": {"title": "Trading sessions", "format": "trading_sessions", "minItems": 1,
+                     "description": "Each session needs a date label and timezone-aware opening and closing times."},
+        "incomplete": {"title": "Incomplete sessions", "enum": ["raise", "drop"],
+                       "description": "Fail when a session is incomplete, or drop incomplete sessions."},
+        "target_timeframe": {"title": "Output timeframe", "enum": ["1d"]},
+    }}
 
     def __post_init__(self):
         if self.incomplete not in ("raise", "drop") or self.target_timeframe != "1d":
@@ -99,6 +109,20 @@ class ResampleOHLCV(BaseProcessor):
         if input_contract.timeframe != "1h":
             raise ProcessingError("Hourly-to-daily resampling requires a 1h input contract.")
         return DataContract("1d")
+
+    def validate_backtest_calendar(self, bars, *, input_contract: DataContract,
+                                   output_contract: DataContract) -> None:
+        if self.output_contract(input_contract) != output_contract:
+            raise ProcessingError("Resampling output contract does not match the execution calendar.")
+        sessions = {datetime.combine(session.label, datetime.min.time(), UTC): session
+                    for session in self.sessions}
+        for bar in bars:
+            session = sessions.get(bar.timestamp)
+            if session is None or (session.open, session.close) != (bar.open, bar.close):
+                raise ProcessingError(
+                    f"Resampling session {bar.timestamp.date()} does not match the execution calendar's "
+                    "opening and completion times."
+                )
 
     def _validate_input(self, frame, input_contract: DataContract):
         self._groups(frame)

@@ -3,8 +3,9 @@
 from .pipeline import Pipeline, Processor
 from .contracts import DataContract, ProcessingResult
 from .processors import BaseProcessor, ScalePrices, ResampleOHLCV, TradingSession
-from .registry import ProcessorRegistry, load_pipeline
+from .registry import ProcessorDefinition, ProcessorRegistry, discover_processors, load_pipeline
 
 __all__ = ["BaseProcessor", "DataContract", "ProcessingResult",
-           "Pipeline", "Processor", "ProcessorRegistry", "ScalePrices", "load_pipeline",
+           "Pipeline", "Processor", "ProcessorDefinition", "ProcessorRegistry", "ScalePrices",
+           "discover_processors", "load_pipeline",
            "ResampleOHLCV", "TradingSession"]

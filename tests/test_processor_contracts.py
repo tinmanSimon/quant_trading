@@ -248,3 +248,10 @@ def test_reusing_processor_keeps_contracts_invocation_local(sample_ohlcv_frame):
     assert_frame_equal(first.frame, third.frame)
     assert vars(processor) == original_state
     assert pipeline.fingerprint == fingerprint
+
+
+def test_default_backtest_calendar_hook_accepts_unchanged_contract_only():
+    processor = ScalePrices(2)
+    processor.validate_backtest_calendar((), input_contract=DataContract("1h"), output_contract=DataContract("1h"))
+    with pytest.raises(ProcessingError, match="implement validate_backtest_calendar"):
+        processor.validate_backtest_calendar((), input_contract=DataContract("1h"), output_contract=DataContract("1d"))

@@ -296,3 +296,22 @@ def test_daily_raw_and_resampled_daily_data_coexist(isolated_data_dir, hourly, d
     pipeline.process(raw_hourly.dataset_id, processors=[ResampleOHLCV(sessions)])
     assert_frame_equal(pipeline.read(DataQuery(layer="raw", timeframe="1d")), daily)
     assert_frame_equal(pipeline.read(DataQuery(layer="processed", timeframe="1d")), daily)
+
+
+def test_resampler_validates_its_own_backtest_calendar(sessions):
+    from types import SimpleNamespace
+
+    bars = tuple(SimpleNamespace(timestamp=datetime.combine(session.label, datetime.min.time(), UTC),
+                                 open=session.open, close=session.close) for session in sessions)
+    processor = ResampleOHLCV(sessions)
+    processor.validate_backtest_calendar(bars, input_contract=DataContract("1h"), output_contract=DataContract("1d"))
+    # Research can select a subset of a saved revision's coverage.
+    processor.validate_backtest_calendar(bars[-1:], input_contract=DataContract("1h"), output_contract=DataContract("1d"))
+    for changes in ({"open": bars[0].open + timedelta(minutes=1)},
+                    {"close": bars[0].close + timedelta(minutes=1)},
+                    {"timestamp": bars[0].timestamp - timedelta(days=1)}):
+        wrong = SimpleNamespace(**(vars(bars[0]) | changes))
+        with pytest.raises(ProcessingError, match="execution calendar.*completion times"):
+            processor.validate_backtest_calendar((wrong,), input_contract=DataContract("1h"), output_contract=DataContract("1d"))
+    with pytest.raises(ProcessingError, match="output contract"):
+        processor.validate_backtest_calendar(bars, input_contract=DataContract("1h"), output_contract=DataContract("1h"))

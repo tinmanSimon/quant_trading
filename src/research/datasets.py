@@ -12,6 +12,7 @@ from data_pipeline import DataPipeline, DataQuery, DataRequest, validate_ohlcv
 
 from .errors import PreflightError, ResearchError
 from .instruments import ExpectedBar, Instrument, expected_bars
+from .processed import validate_processed_source
 
 
 @dataclass(frozen=True)
@@ -61,9 +62,16 @@ def normalize_tickers(tickers, *, provider: str, start: datetime, end: datetime,
 def prepare_snapshot(pipeline: DataPipeline, *, tickers, start: datetime, end: datetime,
                      timeframe: str, lookback: int, provider: str = "yahoo", calendar: str = "XNYS",
                      instruments: Mapping[str, Instrument] | None = None,
-                     as_of: datetime | None = None, layer: str = "raw") -> DatasetSnapshot:
+                     as_of: datetime | None = None, layer: str = "raw",
+                     pipeline_id: str | None = None) -> DatasetSnapshot:
     symbols = normalize_tickers(tickers, provider=provider, start=start, end=end, timeframe=timeframe)
-    query = DataQuery(provider=provider, start=start, end=end, timeframe=timeframe, layer=layer)
+    if layer == "processed" and pipeline_id is None:
+        raise ResearchError("Processed backtests require an explicit pipeline_id and registered processors with a causality guarantee.")
+    if layer == "raw" and pipeline_id is not None:
+        raise ResearchError("Raw backtests must not specify pipeline_id.")
+    query = DataQuery(provider=provider, start=start, end=end, timeframe=timeframe,
+                      layer=layer, pipeline_id=pipeline_id)
+    pipeline_id = query.pipeline_id
     start, end, timeframe, provider = query.start, query.end, query.timeframe, query.provider
     now = datetime.now(UTC)
     if as_of is None:
@@ -73,9 +81,14 @@ def prepare_snapshot(pipeline: DataPipeline, *, tickers, start: datetime, end: d
     as_of = as_of.astimezone(UTC)
     if as_of > now:
         raise ResearchError("as_of cannot be in the future.")
-    if layer != "raw":
-        raise ResearchError("Backtests currently require raw data; arbitrary processed histories have no causality guarantee.")
+    registry = None
+    if layer == "processed":
+        from data_pipeline.processing import discover_processors
+        registry = discover_processors()
     frames, bar_map, sources, instrument_specs = {}, {}, {}, {}
+    parent_sources, parent_cache = {}, {}
+    processor_specs = None
+    price_basis = "vendor_unadjusted"
     issues, notes = [], []
     for symbol in symbols:
         try:
@@ -92,13 +105,25 @@ def prepare_snapshot(pipeline: DataPipeline, *, tickers, start: datetime, end: d
                 issues.append(DataIssue(symbol, "out_of_range_opens", "Requested session opens fall outside the execution interval.", invalid_opens))
             needed = {bar.timestamp for bar in bars}
             selection = DataQuery(layer=layer, provider=provider, symbol=symbol, timeframe=timeframe,
-                                  start=bars[0].timestamp, end=end)
+                                  start=bars[0].timestamp, end=end, pipeline_id=pipeline_id)
             # IDs identify immutable files. Read those exact revisions, never
             # re-run an active-data query after preflight or between strategies.
             items = tuple(pipeline.list_datasets(selection))
             if not items:
                 issues.append(DataIssue(symbol, "no_data", "No local data for the required trading and warm-up interval."))
                 continue
+            if layer == "processed":
+                selected_parents = {}
+                for item in items:
+                    specs, parents, basis = validate_processed_source(
+                        pipeline, item, pipeline_id=pipeline_id, registry=registry,
+                        bars=bars, parent_cache=parent_cache,
+                    )
+                    if processor_specs is not None and (specs != processor_specs or basis != price_basis):
+                        raise ResearchError("Cannot combine different processed pipeline specifications or price bases.")
+                    processor_specs, price_basis = specs, basis
+                    selected_parents.update({parent.dataset_id: parent for parent in parents})
+                parent_sources[symbol] = [json.loads(parent.to_json()) for _, parent in sorted(selected_parents.items())]
             frame = pl.concat([pipeline.read_dataset(item.dataset_id) for item in items]).sort("symbol", "timestamp")
             frame = frame.filter(
                 (pl.col("timestamp").cast(pl.Datetime("us", "UTC")) >= bars[0].timestamp)
@@ -127,11 +152,14 @@ def prepare_snapshot(pipeline: DataPipeline, *, tickers, start: datetime, end: d
     report = PreflightReport(tuple(issues), tuple(notes))
     if not report.ok:
         raise PreflightError(report)
-    return DatasetSnapshot(frames, bar_map, {
+    manifest = {
         "tickers": list(symbols), "provider": provider, "timeframe": timeframe, "layer": layer,
         "start": start.isoformat(), "end": end.isoformat(),
         "lookback": lookback, "as_of": as_of.isoformat(), "sources": sources,
         "instruments": instrument_specs, "calendar_version": xcals.__version__,
-        "price_basis": "vendor_unadjusted", "return_basis": "price_return_no_dividend_credit",
+        "price_basis": price_basis, "return_basis": "price_return_no_dividend_credit",
         "account_mode": "independent_long_only_usd_accounts", "notes": list(notes),
-    }, report)
+    }
+    if layer == "processed":
+        manifest.update(pipeline_id=pipeline_id, processors=processor_specs, parent_sources=parent_sources)
+    return DatasetSnapshot(frames, bar_map, manifest, report)

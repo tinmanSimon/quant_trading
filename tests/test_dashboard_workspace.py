@@ -218,3 +218,29 @@ def test_unreadable_workspace_remains_usable_in_session(tmp_path, monkeypatch):
     memory.values["widgets"]["symbol"] = "TEST"
     memory.save()
     assert memory.values["widgets"]["symbol"] == "TEST"
+
+
+def test_saved_dropdown_overrides_default_without_duplicate_state_warning(monkeypatch):
+    from streamlit.elements.lib import policies
+    from unittest.mock import Mock
+
+    warning = Mock()
+    monkeypatch.setattr(policies, "_shown_default_value_warning", False)
+    monkeypatch.setattr(policies._LOGGER, "warning", warning)
+    script = (
+        "import streamlit as st\n"
+        "from dashboard.workspace import market_memory\n"
+        "memory = market_memory('dropdown-default')\n"
+        "memory.widget(st.selectbox, 'Timezone', "
+        "options=['UTC', 'America/New_York', 'Asia/Shanghai'], index=1, key='timezone')\n"
+        "memory.save()\n"
+    )
+    app = AppTest.from_string(script).run()
+    assert app.selectbox(key="timezone").value == "America/New_York"
+    app.selectbox(key="timezone").set_value("Asia/Shanghai").run()
+    app.run()
+    fresh = AppTest.from_string(script).run()
+    for restored in (app, fresh):
+        assert not restored.exception and not restored.error
+        assert restored.selectbox(key="timezone").value == "Asia/Shanghai"
+    warning.assert_not_called()

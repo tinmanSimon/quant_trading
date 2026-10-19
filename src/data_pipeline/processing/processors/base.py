@@ -1,7 +1,7 @@
 """Processor template: subclasses implement hooks, not the public transform wrapper."""
 
 from abc import ABC, abstractmethod
-from typing import final
+from typing import ClassVar, final
 
 import polars as pl
 
@@ -19,8 +19,46 @@ class BaseProcessor(ABC):
     Contracts are invocation-local, never stored as mutable processor state.
     """
 
+    # Discovery reads these declarations without constructing the processor.
+    # Mark causal only when each output bar uses information available by its
+    # completion time. Explicit metadata is required for research eligibility.
+    causal: ClassVar[bool] = False
+    price_basis: ClassVar[str] = "preserve"
+    config_schema: ClassVar[dict | None] = None
+
+    @property
+    def config(self):
+        """Infer JSON settings unless an implementation provides its own config."""
+        if "_explicit_processor_config" in self.__dict__:
+            return self.__dict__["_explicit_processor_config"]
+        from ..configuration import instance_config
+        return instance_config(self)
+
+    @config.setter
+    def config(self, value):
+        # Retain compatibility with processors that set self.config explicitly.
+        self._explicit_processor_config = value
+
     def output_contract(self, input_contract: DataContract) -> DataContract:
         return input_contract
+
+    def validate_backtest_calendar(self, bars, *, input_contract: DataContract,
+                                   output_contract: DataContract) -> None:
+        """Validate the timing of output used by the research execution calendar.
+
+        ``bars`` contains records with ``timestamp``, ``open``, and ``close``
+        timezone-aware UTC datetimes, restricted to the saved output's coverage.
+        This hook is independent of research implementation types. The default
+        supports unchanged contracts: a causal processor promises output values
+        are available by each output bar's completion time. A processor changing
+        timeframes/timestamp conventions must override this hook and validate
+        its configured aggregation or labeling against the supplied calendar.
+        """
+        if input_contract != output_contract:
+            raise ProcessingError(
+                "Processors changing the data contract must implement "
+                "validate_backtest_calendar to validate execution calendar completion times."
+            )
 
     @final
     def transform(self, frame: pl.DataFrame, input_contract: DataContract) -> ProcessingResult:

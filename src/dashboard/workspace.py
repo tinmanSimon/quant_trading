@@ -131,8 +131,8 @@ class MarketMemory:
                     value = int(value) if integer else float(value)
                 value = max(kwargs.get("min_value", value), value) if kwargs.get("min_value") is not None else value
                 value = min(kwargs.get("max_value", value), value) if kwargs.get("max_value") is not None else value
-        if present and kind in ("checkbox", "expander", "text_input", "date_input"):
-            expected = {"checkbox": bool, "expander": bool, "text_input": str, "date_input": date}[kind]
+        if present and kind in ("checkbox", "expander", "text_input", "text_area", "date_input", "time_input"):
+            expected = {"checkbox": bool, "expander": bool, "text_input": str, "text_area": str, "date_input": date, "time_input": time}[kind]
             present = type(value) is expected
         if present and kind == "date_input":
             # Explicit bounds keep older saved market dates selectable even when
@@ -143,6 +143,8 @@ class MarketMemory:
         if present:
             st.session_state[key] = value
             kwargs.pop("value", None)
+            kwargs.pop("default", None)
+            kwargs.pop("index", None)
         else:
             st.session_state.pop(key, None)
         value = render(label, key=key, on_change=self._capture, args=(key,), **kwargs)

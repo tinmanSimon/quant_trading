@@ -84,6 +84,74 @@ Launch the dashboard from the repository root:
 python -m streamlit run src/dashboard/app.py
 ```
 
+### Processing data in the dashboard
+
+Open **Process data**, select a provider, source interval, tickers, and active raw
+batches. Add processors in execution order and edit their settings. Steps can be
+reordered or removed. **Preview processing** runs the entire selected input and
+shows input/output counts plus the first 100 rows without saving datasets.
+**Process and save** creates immutable processed revisions separately for each
+ticker and reports individual failures. Repeating the same pipeline on the same
+raw revisions reuses the verified existing output; raw bars remain unchanged.
+
+Use **Save pipeline recipe** to name and reuse an ordered configuration. Draft
+steps, parameter edits, source selections, recipes, and the last save report are
+stored per data directory in `.local/market_workspaces/`, including across new
+dashboard sessions. Preview tables stay in the current session and disappear
+when their inputs or configuration change. Recipes include exact processor
+versions and effective configuration; identical configurations share a pipeline
+ID even if their display name changes.
+
+For **Resample OHLCV**, choose inclusive session dates and a calendar from the
+searchable dropdown, then select **Exchange regular hours** or **Custom session
+hours**. The dropdown discovers calendars from the installed `exchange_calendars`
+library, groups aliases under their canonical name, and offers calendars with
+continuous sessions for the chosen dates. Examples include `XNYS` (also used by
+the library for aliases such as `XNAS`), `XLON`, `XTSE`, and `XASX`. Calendars with
+scheduled intraday breaks, or unavailable date coverage, are excluded with the
+reason shown in **Calendars unavailable for these dates**. This is support for
+the library's modeled schedules; consult the provider's bar conventions when
+matching data to a calendar.
+
+**Exchange regular hours** uses the calendar's exact openings, closings, holidays,
+and early closes. **Custom session hours** uses its trading-date list and
+holidays, but replaces opening and closing times with the local times you enter.
+Choose a named timezone, initially the calendar's timezone, so daylight-saving
+offsets are calculated separately for every date. Custom hours override early
+closes as well; edit individual session JSON entries if a date needs different
+hours. Select **Previous calendar day** when the opening belongs to the evening
+before the session label. A closing clock time at or before the opening clock
+time closes on the following day; equal times mean a full day. Ambiguous or
+nonexistent local times at daylight-saving transitions are rejected explicitly.
+
+Click **Generate session schedule** to apply those controls. Editing generator
+controls alone leaves the current schedule unchanged; the JSON is the actual
+processor configuration and remains directly editable. Generated timestamps
+are UTC. For example, 04:00–20:00 America/New_York on 2024-10-11 becomes
+08:00 UTC that day through 00:00 UTC the following day. Settings persist across
+page navigation and new dashboard sessions.
+
+The current resampler converts hourly bars into daily OHLCV. Its incomplete-session
+policy can raise or drop; out-of-session and off-grid bars are always rejected.
+Custom hours do not split mixed regular/extended-hours bars or repair alignment:
+input must already match an hourly grid anchored to the configured opening.
+The schedule is part of the saved pipeline identity. Review it when applying a
+saved recipe to different dates. These calendar choices apply to processing;
+the dashboard's Backtest page still uses XNYS and requires resampled session
+boundaries to match its calendar.
+
+Saved outputs have **Open in Market data** and **Use in Backtest** shortcuts.
+Market data's processed layer and Backtest's processed source let you choose a
+specific named pipeline. Backtest retains source selections and date/time bounds,
+and requires all selected tickers and warm-up history from that exact pipeline;
+it never substitutes raw data. A shortcut initially selects the output's full
+date range, so adjust the backtest start to allow the strategy's warm-up bars.
+Backtest manifests record pipeline settings, processed revisions, and raw-parent
+revisions. Keep the raw parent files for processed backtests: preflight verifies
+their checksums and contracts as well as the processed output. Processed charts
+can still be viewed after their raw parents are deleted. Transformed prices have
+a distinct price-basis label in saved results.
+
 ### Saved Market data workspace
 
 Market data automatically remembers its provider, ticker search and selection,
@@ -809,8 +877,9 @@ The CLI loads an ordered JSON list from a file:
 ```
 
 Python callers can pass processor instances directly or register custom
-factories with `ProcessorRegistry`. The CLI's built-in registry contains
-`scale_prices` and `resample_ohlcv`, both version `1`.
+factories with `ProcessorRegistry`. The default loader, CLI, dashboard, and
+processed-data backtests automatically discover processors; the bundled
+processors are `scale_prices` and `resample_ohlcv`, both version `1`.
 
 ### Implementing a processor
 
@@ -820,6 +889,52 @@ and its session helpers. Both `data_pipeline.processing` and
 `data_pipeline.processing.processors` expose these classes for public imports.
 Shared execution and metadata modules such as `pipeline.py`, `contracts.py`
 and `registry.py` remain directly under `processing/`.
+
+A concrete `BaseProcessor` subclass defined in any Python module under
+`src/data_pipeline/processing/processors/` is automatically registered. Give it
+unique `name` and `version` identifiers. No registry list, package export, or
+dashboard branch needs updating. New modules appear on a dashboard rerun;
+restart after editing modules already imported into the Python process. Broken
+imports or duplicate identities are reported without hiding unrelated processors.
+Only install trusted local Python processors: discovery imports their modules.
+
+Configuration is inferred from typed dataclass fields or constructor parameters.
+Defaults, `Literal`/enum choices, optional values, dates/times, nested dataclasses,
+and lists/tuples are supported. Put display titles, descriptions, and constraints
+in `field(metadata={"schema": {...}})` or a class-level `config_schema` override.
+The dashboard renders numbers, text, choices, booleans, and nested objects;
+arrays, maps, and complex unions have editable JSON controls. The same schema
+validates dashboard and programmatic configuration before construction. A
+processor with no settings displays “This processor doesn’t have any configurable
+variables.” A custom `from_config(values)` classmethod can construct application
+specific types. For example, a configurable processor can declare:
+
+```python
+from dataclasses import dataclass, field
+from typing import ClassVar
+from data_pipeline.processing import BaseProcessor
+
+@dataclass(frozen=True)
+class MyProcessor(BaseProcessor):
+    name: ClassVar[str] = "my_processor"
+    version: ClassVar[str] = "1"
+    label: ClassVar[str] = "My processor"
+    factor: float = field(default=1.0, metadata={
+        "schema": {"title": "Factor", "exclusiveMinimum": 0}
+    })
+    # Implement the three hooks below to make this concrete and discoverable.
+```
+
+Increase the version when transformation semantics change. For backtesting,
+explicitly declare `causal = True` only if each output bar uses information
+available by that bar's completion. Declare `price_basis = "transformed"` when
+changing price units; otherwise the default preserves the input price basis.
+Timeframe-changing processors must also implement
+`validate_backtest_calendar(bars, *, input_contract, output_contract)` to verify
+output availability against the supplied expected bars (timestamp, open, close).
+The base implementation accepts unchanged contracts. This validation lives in
+the processor, so adding one does not require editing research logic. Processors
+without a causality declaration remain usable for processing and charts.
 
 Inherit `BaseProcessor` and implement the three internal hooks. Do not override
 the public `transform(frame, input_contract)` wrapper: it resolves the output

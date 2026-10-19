@@ -50,29 +50,37 @@ class Research:
                                 instruments=self.instruments, **kwargs)
 
     def preflight(self, tickers, *, strategies, start, end, timeframe="1d", provider="yahoo",
-                  calendar="XNYS", as_of=None):
+                  calendar="XNYS", as_of=None, layer="raw", pipeline_id=None):
         workers = self._strategies(strategies)
         try:
             return self._snapshot(tickers, workers, start=start, end=end, timeframe=timeframe,
-                                  provider=provider, calendar=calendar, as_of=as_of).report
+                                  provider=provider, calendar=calendar, as_of=as_of,
+                                  layer=layer, pipeline_id=pipeline_id).report
         except PreflightError as exc:
             return exc.report
 
     def backtest(self, tickers, *, strategies, start, end, timeframe="1d", provider="yahoo",
-                 calendar="XNYS", as_of=None, settings: ExecutionSettings | None = None) -> ResearchRun:
+                 calendar="XNYS", as_of=None, settings: ExecutionSettings | None = None,
+                 layer="raw", pipeline_id=None) -> ResearchRun:
         workers = self._strategies(strategies)
         settings = settings if settings is not None else ExecutionSettings()
         if not isinstance(settings, ExecutionSettings):
             raise TypeError("settings must be ExecutionSettings.")
         # Finish checking EVERY requested instrument before evaluating any strategy.
         snapshot = self._snapshot(tickers, workers, start=start, end=end, timeframe=timeframe,
-                                  provider=provider, calendar=calendar, as_of=as_of)
+                                  provider=provider, calendar=calendar, as_of=as_of,
+                                  layer=layer, pipeline_id=pipeline_id)
         results = []
         for symbol, frame in snapshot.frames.items():
             times = {bar.timestamp: (bar.open, bar.close) for bar in snapshot.bars[symbol]}
             for worker in workers:
-                results.append(run_backtest(frame, worker, start=start, end=end,
-                                            settings=settings, bar_times=times))
+                result = run_backtest(frame, worker, start=start, end=end,
+                                      settings=settings, bar_times=times)
+                result.metadata.update(layer=snapshot.manifest["layer"],
+                                       price_basis=snapshot.manifest["price_basis"])
+                if layer == "processed":
+                    result.metadata["pipeline_id"] = snapshot.manifest["pipeline_id"]
+                results.append(result)
         manifest = dict(snapshot.manifest)
         manifest["execution_settings"] = settings.to_dict()
         manifest["strategies"] = [strategy_spec(worker) for worker in workers]

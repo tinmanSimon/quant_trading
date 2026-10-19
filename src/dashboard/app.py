@@ -13,6 +13,7 @@ from dashboard.charts import CHART_CONFIG, bar_table, line_chart
 from dashboard.chart_cache import BoundedChartCache
 from dashboard.chart_component import render_series_chart
 from dashboard.deletion import deletion_page
+from dashboard.processing import processing_page, pipeline_label, backtest_memory
 from dashboard.strategy_controls import strategy_specs
 from dashboard.trend_input import completed_prefix
 from dashboard.trend_selection import filter_trends_by_lambda, filter_trends_by_slope, select_trends
@@ -57,8 +58,10 @@ def _date_fields(prefix: str, *, first: date | None = None, last: date | None = 
         start = left.date_input("Start date (UTC, inclusive)", first, key=f"{prefix}-start")
         end = right.date_input("End date (UTC, exclusive)", last, key=f"{prefix}-end")
     if intraday:
-        start_time = left.time_input("Start time (UTC)", time.min, step=60, key=f"{prefix}-start-time")
-        end_time = right.time_input("End time (UTC)", time.min, step=60, key=f"{prefix}-end-time")
+        start_time = (memory.widget(left.time_input, "Start time (UTC)", value=time.min, step=60, key=f"{prefix}-start-time") if memory else
+                      left.time_input("Start time (UTC)", time.min, step=60, key=f"{prefix}-start-time"))
+        end_time = (memory.widget(right.time_input, "End time (UTC)", value=time.min, step=60, key=f"{prefix}-end-time") if memory else
+                    right.time_input("End time (UTC)", time.min, step=60, key=f"{prefix}-end-time"))
         return datetime.combine(start, start_time, UTC), datetime.combine(end, end_time, UTC)
     return _utc_date(start), _utc_date(end)
 
@@ -150,7 +153,7 @@ def _render_data_page(research: Research, memory):
     symbol_items = [item for item in items if item.request.symbol == symbol]
     identities = sorted({(item.request.provider, item.request.timeframe, item.pipeline_id) for item in symbol_items})
     identity = memory.widget(st.selectbox, "Data series", options=identities, key="browse-series",
-                            format_func=lambda value: f"{value[0]} · {value[1]}" + (f" · pipeline {value[2][:12]}" if value[2] else ""))
+                            format_func=lambda value: f"{value[0]} · {value[1]}" + (f" · {pipeline_label(research, value[2], symbol_items)}" if value[2] else ""))
     matching = [item for item in symbol_items
                 if (item.request.provider, item.request.timeframe, item.pipeline_id) == identity]
     mode = memory.widget(st.radio, "Read", options=["Active batches together", "One exact revision"],
@@ -381,6 +384,8 @@ def _fetch_page(research: Research):
 
 def _show_result(run):
     st.subheader(f"Run {run.run_id}")
+    if run.manifest.get("price_basis") == "processed_transformed_prices":
+        st.info("This run executes at transformed prices. Cash, trade sizes, and account values use those transformed price units.")
     st.caption("Each ticker has an independent account. Price returns exclude dividends; these are not shared-capital portfolio results.")
     st.dataframe(run.comparison, hide_index=True)
     st.caption("Return and drawdown metrics are fractions: 0.10 means 10%.")
@@ -414,25 +419,69 @@ def _show_result(run):
 
 
 def _backtest_page(research: Research):
+    memory = backtest_memory(research)
+    try:
+        _render_backtest_page(research, memory)
+    finally:
+        memory.save()
+        if memory.warning:
+            st.warning(memory.warning)
+
+
+def _render_backtest_page(research: Research, memory):
     st.title("Backtest strategies")
     st.caption("All selected tickers must pass local-data and warm-up checks before any strategy runs. "
                "Orders use the next bar's open; this screen never fetches missing data.")
-    # Discover strategies on this page even when the store has no raw data yet.
     registry = research.strategy_registry
-    local = research.pipeline.list_datasets(DataQuery(layer="raw"))
+    layer = memory.widget(st.radio, "Data source", options=["raw", "processed"],
+                          horizontal=True, key="backtest-layer", format_func=str.title)
+    local = research.pipeline.list_datasets(DataQuery(layer=layer))
+    if not local:
+        st.session_state.pop("backtest-run", None)
+        st.info("No active processed datasets. Open Process data to create one." if layer == "processed"
+                else "No local raw datasets. Open Fetch to download data.")
+        return
     provider = _provider_choice((item.request.provider for item in local),
-                                key="backtest-provider", result_key="backtest-run")
+                                key="backtest-provider", result_key="backtest-run", memory=memory)
     if provider is None:
         return
     local = [item for item in local if item.request.provider == provider]
-    symbols = sorted({item.request.symbol for item in local})
-    tickers = st.multiselect("Local tickers", symbols, default=symbols[:1])
-    extra = st.text_input("Additional required tickers", help="A missing ticker will be reported by preflight and abort the run.")
-    timeframe = st.selectbox("Bar size", BACKTEST_TIMEFRAMES, key="backtest-timeframe")
-    start, end = _date_fields("backtest", intraday=timeframe in INTRADAY_DURATIONS)
+    pipeline_id = None
+    if layer == "processed":
+        pipeline_ids = sorted({item.pipeline_id for item in local})
+        pipeline_labels = {value: pipeline_label(research, value, items=local) for value in pipeline_ids}
+        pipeline_id = memory.widget(st.selectbox, "Processing pipeline", options=pipeline_ids,
+                                    key="backtest-pipeline", format_func=pipeline_labels.get)
+        local = [item for item in local if item.pipeline_id == pipeline_id]
+        st.caption(f"Pipeline ID: {pipeline_id}. Preflight verifies its processors and raw-source lineage.")
+    timeframes = (list(BACKTEST_TIMEFRAMES) if layer == "raw" else
+                  [value for value in BACKTEST_TIMEFRAMES if any(
+                      item.request.timeframe == value for item in local)])
+    if not timeframes:
+        st.session_state.pop("backtest-run", None)
+        st.info("This pipeline has no output intervals supported by backtesting.")
+        return
+    timeframe = memory.widget(st.selectbox, "Bar size", options=timeframes, key="backtest-timeframe")
+    symbols = sorted({item.request.symbol for item in local
+                      if layer == "raw" or item.request.timeframe == timeframe})
+    tickers = memory.widget(st.multiselect, "Local tickers", options=symbols,
+                            default=symbols[:1], key="backtest-tickers")
+    extra = memory.widget(st.text_input, "Additional required tickers", key="backtest-extra",
+                          help="A missing ticker will be reported by preflight and abort the run.")
+    start, end = _date_fields("backtest", intraday=timeframe in INTRADAY_DURATIONS, memory=memory)
     available = sorted({item.request.symbol for item in local if item.request.timeframe == timeframe})
     st.caption(f"Local {timeframe} data: {', '.join(available) if available else 'none'}. "
                "Preflight requires this exact interval, including warm-up; other intervals are not substituted.")
+    if layer == "processed":
+        st.caption("Every ticker uses this same pipeline. Keep its raw parent files for lineage verification. "
+                   "Choose a start date with enough earlier processed bars for strategy warm-up.")
+    chosen = list(dict.fromkeys(tickers + _tickers(extra, provider)))
+    source_identity = (layer, provider, pipeline_id, timeframe, tuple(chosen), start, end,
+                       tuple(sorted(item.dataset_id for item in local
+                                    if item.request.timeframe == timeframe and item.request.symbol in chosen)))
+    if st.session_state.get("backtest-source-identity") != source_identity:
+        st.session_state.pop("backtest-run", None)
+        st.session_state["backtest-source-identity"] = source_identity
     specs = strategy_specs(registry)
     st.caption("Strategy lookbacks count bars at the selected interval. Download history before the test start; "
                "preflight checks the longest selected requirement for every ticker.")
@@ -448,7 +497,6 @@ def _backtest_page(research: Research):
     submitted = st.button("Validate all data and run", type="primary", disabled=specs is None)
     if submitted:
         st.session_state.pop("backtest-run", None)
-        chosen = list(dict.fromkeys(tickers + _tickers(extra, provider)))
         if not chosen or not specs or start >= end:
             st.error("Choose tickers, at least one strategy, and a valid date range.")
             return
@@ -457,7 +505,8 @@ def _backtest_page(research: Research):
         try:
             with st.spinner("Checking all datasets, then running strategies…"):
                 run = research.backtest(chosen, strategies=specs, start=start, end=end,
-                                        timeframe=timeframe, provider=provider, settings=settings, calendar="XNYS")
+                                        timeframe=timeframe, provider=provider, settings=settings,
+                                        calendar="XNYS", layer=layer, pipeline_id=pipeline_id)
             st.session_state["backtest-run"] = run
         except PreflightError as error:
             st.session_state.pop("backtest-run", None)
@@ -500,7 +549,7 @@ def main():
         if directories.warning:
             st.warning(directories.warning)
         st.caption(f"Data: {Path(data_dir).expanduser().resolve()}")
-        page = st.radio("Navigate", ["Market data", "Fetch", "Backtest", "Saved runs", "Delete data"])
+        page = st.radio("Navigate", ["Market data", "Fetch", "Process data", "Backtest", "Saved runs", "Delete data"], key="dashboard-page")
         st.caption("Local data · reproducible research")
     # A store switch must not leave results from another directory on screen.
     identity = (str(Path(data_dir).expanduser().resolve()), str(Path(runs_dir).expanduser().resolve()))
@@ -510,7 +559,7 @@ def main():
         st.session_state["store-identity"] = identity
     try:
         research = Research(data_dir=data_dir, runs_dir=runs_dir)
-        {"Market data": _data_page, "Fetch": _fetch_page,
+        {"Market data": _data_page, "Fetch": _fetch_page, "Process data": processing_page,
          "Backtest": _backtest_page, "Saved runs": _runs_page, "Delete data": deletion_page}[page](research)
     except Exception as error:
         # Domain errors are displayed while preserving the local store; full

@@ -164,6 +164,12 @@ def comparison_identity(manifest: dict) -> dict:
             "instruments", "calendar_version", "price_basis", "return_basis", "account_mode",
             "execution_settings", "engine_sha256")
     result = {key: manifest[key] for key in keys}
+    result["pipeline_id"] = manifest.get("pipeline_id")
+    result["processors"] = manifest.get("processors")
+    result["parent_sources"] = {
+        symbol: sorted((item["dataset_id"], item["checksum_sha256"]) for item in items)
+        for symbol, items in manifest.get("parent_sources", {}).items()
+    }
     result["lookback"] = manifest.get("lookback")
     result["packages"] = manifest.get("packages")
     result["sources"] = {symbol: sorted((item["dataset_id"], item["checksum_sha256"]) for item in items)
