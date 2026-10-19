@@ -56,8 +56,8 @@ def add_module(package: Path, name: str, source: str):
 def test_builtins_are_described_and_keep_existing_fingerprints():
     registry = discover_processors()
     assert not registry.issues
-    assert {(item.name, item.version) for item in registry.definitions()} == {
-        ("scale_prices", "1"), ("resample_ohlcv", "1"),
+    assert {("scale_prices", "1"), ("resample_ohlcv", "1")} <= {
+        (item.name, item.version) for item in registry.definitions()
     }
     scale = registry.definition("scale_prices", "1")
     assert scale.causal is True

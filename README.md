@@ -102,6 +102,35 @@ when their inputs or configuration change. Recipes include exact processor
 versions and effective configuration; identical configurations share a pipeline
 ID even if their display name changes.
 
+To strip bars outside a recurring clock window, add **Filter by time window**
+(`filter_time_window`, version `1`). Configure **Start time (inclusive)**,
+**End time (exclusive)** as local times such as `09:00` and `16:00`, and choose
+**Window timezone** (default `America/New_York`). This keeps bars whose start
+timestamps satisfy `09:00 <= local time < 16:00` on each date. Named timezones
+handle daylight-saving offsets automatically; retained timestamps remain UTC
+and their OHLCV values stay unchanged. The filter supports intraday bars only.
+An end earlier than the start crosses midnight; equal times keep the full day.
+If no bars match, processing reports the empty result instead of saving an empty
+dataset. The fixed window does not infer holidays or early closes.
+
+Place this step **before resampling** when removing unwanted hours. Filtering
+uses bar start timestamps and does not split bars: a 09:00–10:00 bar is removed
+by a window starting at 09:30, including its regular-session portion. A retained
+bar that crosses the window's end stays whole. Accurate partial-bar trimming
+requires finer input data. The subsequent resampler still requires bars aligned
+to its own session opening and checks session completeness.
+
+Python callers can import the class from its module:
+
+```python
+from datetime import time
+from data_pipeline.processing.processors.time_window import TimeWindowFilter
+
+window = TimeWindowFilter(start_time=time(9), end_time=time(16),
+                          timezone="America/New_York")
+processed = pipeline.process(raw_id, processors=[window])
+```
+
 For **Resample OHLCV**, choose inclusive session dates and a calendar from the
 searchable dropdown, then select **Exchange regular hours** or **Custom session
 hours**. The dropdown discovers calendars from the installed `exchange_calendars`
@@ -818,7 +847,7 @@ src/data_pipeline/
 ├── schemas/ohlcv.py        # Canonical frame contract and validation
 ├── providers/             # Common interface, registry, Yahoo and Massive adapters
 ├── processing/            # Shared execution, contracts, validation and registry
-│   └── processors/        # Shared base.py, plus scaling.py and resampling.py
+│   └── processors/        # Shared base.py, plus scaling.py, resampling.py and time_window.py
 └── storage/               # Immutable files, DuckDB catalog, locking, metadata
 
 data/                      # Git-ignored local storage
@@ -879,14 +908,17 @@ The CLI loads an ordered JSON list from a file:
 Python callers can pass processor instances directly or register custom
 factories with `ProcessorRegistry`. The default loader, CLI, dashboard, and
 processed-data backtests automatically discover processors; the bundled
-processors are `scale_prices` and `resample_ohlcv`, both version `1`.
+processors are `scale_prices`, `resample_ohlcv`, and `filter_time_window`, all
+version `1`.
 
 ### Implementing a processor
 
 Processors live in `processing/processors/`: `base.py` contains `BaseProcessor`,
 `scaling.py` contains `ScalePrices`, and `resampling.py` contains `ResampleOHLCV`
-and its session helpers. Both `data_pipeline.processing` and
-`data_pipeline.processing.processors` expose these classes for public imports.
+and its session helpers. Those classes are also exposed by
+`data_pipeline.processing` and `data_pipeline.processing.processors`.
+`time_window.py` contains `TimeWindowFilter`, imported directly from its module
+and discovered automatically without package exports or dashboard changes.
 Shared execution and metadata modules such as `pipeline.py`, `contracts.py`
 and `registry.py` remain directly under `processing/`.
 

@@ -220,3 +220,50 @@ def test_custom_session_hours_process_extended_hour_bars(monkeypatch, tmp_path):
     app.sidebar.radio[0].set_value("Process data").run()
     assert next(r for r in app.radio if r.label == "Session hours").value == "Custom session hours"
     assert json.loads(app.text_area[0].value)[0]["open"] == "2024-10-11T08:00:00+00:00"
+
+
+def test_time_window_processor_is_discovered_configurable_and_saves_filtered_bars(monkeypatch, tmp_path):
+    from datetime import timedelta
+    import dashboard.app as dashboard
+    research = Research(tmp_path / "data", tmp_path / "runs")
+    frame = pl.DataFrame({
+        "timestamp": [datetime(2024, 10, 11, 8, tzinfo=UTC) + timedelta(hours=i) for i in range(16)],
+        "symbol": ["AAPL"] * 16,
+        **{column: [base + i for i in range(16)] for column, base in
+           (("open", 100.), ("high", 102.), ("low", 99.), ("close", 101.))},
+        "volume": [1000.] * 16,
+    })
+    raw = research.pipeline.ingest_frame(DataRequest(symbol="AAPL", provider="yahoo", timeframe="1h",
+        start=datetime(2024, 10, 11, tzinfo=UTC), end=datetime(2024, 10, 12, tzinfo=UTC)), frame).raw
+    monkeypatch.setattr(dashboard, "Research", lambda **kwargs: research)
+    script = "from dashboard.app import main\nmain()"
+    app = AppTest.from_string(script, default_timeout=15).run()
+    app.sidebar.radio[0].set_value("Process data").run()
+    assert "Filter by time window (v1)" in app.selectbox(key="process-add").options
+    app.selectbox(key="process-add").set_value(("filter_time_window", "1")).run()
+    button(app, "Add processor").click().run()
+    assert not app.exception and not app.error
+    assert next(s for s in app.selectbox if s.label == "Window timezone").value == "America/New_York"
+    next(t for t in app.text_input if t.label == "Start time (inclusive)").set_value("09:00")
+    next(t for t in app.text_input if t.label == "End time (exclusive)").set_value("16:00").run()
+    button(app, "Preview processing").click().run()
+    assert not app.exception and not app.error
+    tables = [table.value for table in app.dataframe if "close" in table.value.columns]
+    assert len(tables[0]) == 16 and len(tables[1]) == 7
+    assert tables[1]["timestamp"].iloc[0].hour == 13
+    assert tables[1]["timestamp"].iloc[-1].hour == 19
+    assert not research.pipeline.list_datasets(DataQuery(layer="processed"))
+    next(t for t in app.text_input if t.label == "End time (exclusive)").set_value("15:00").run()
+    button(app, "Process and save").click().run()
+    assert not app.exception and not app.error
+    output, = research.pipeline.list_datasets(DataQuery(layer="processed"))
+    expected = frame.slice(5, 6).with_columns(pl.col("timestamp").cast(pl.Datetime("ms", "UTC")))
+    assert_frame_equal(research.pipeline.read_dataset(output.dataset_id), expected)
+    assert research.pipeline.read_dataset(raw.dataset_id).height == 16
+    restored = AppTest.from_string(script, default_timeout=15).run()
+    restored.sidebar.radio[0].set_value("Process data").run()
+    assert not restored.exception and not restored.error
+    assert next(t for t in restored.text_input if t.label == "End time (exclusive)").value == "15:00"
+    next(t for t in restored.text_input if t.label == "Start time (inclusive)").set_value("bad time").run()
+    assert restored.error and not restored.exception
+    assert button(restored, "Process and save").disabled

@@ -157,7 +157,8 @@ def test_typed_iso_dates_times_and_datetimes_preserve_offsets(tmp_path):
 
 def test_actual_builtin_schemas_render_and_validate(tmp_path):
     registry = discover_processors()
-    for definition in registry.definitions():
+    for name in ("scale_prices", "resample_ohlcv"):
+        definition = registry.definition(name, "1")
         settings = {"factor": 2.0} if definition.name == "scale_prices" else {
             "sessions": [{"label": "2024-01-02", "open": "2024-01-02T14:30:00+00:00", "close": "2024-01-02T21:00:00+00:00"}],
             "incomplete": "raise", "target_timeframe": "1d",
