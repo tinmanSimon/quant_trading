@@ -50,6 +50,7 @@ def test_overlay_window_coordinates_hover_and_bounded_payload():
     assert line["y"][0] == pytest.approx(math.exp(fitted.intercept + fitted.slope * (line["x"][0] - 2000)))
     assert payload["overlay_revision"] == 4
     assert payload["trend_overlays"][0]["start_index"] == 2000
+    assert "Slope (log-price per bar): +0.0002" in line["hovertemplate"]
     assert "Clarity: 0.860" in line["hovertemplate"]
     assert "Boundary robustness: 90.0%" in line["hovertemplate"]
     assert "local countertrend" in line["hovertemplate"]

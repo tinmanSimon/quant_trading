@@ -89,14 +89,14 @@ def _set_form_values(config: TrendConfig) -> None:
     st.session_state[_BOUNDARY_RULE_KEY] = values["redundancy_boundary_rule"]
 
 
-def _controls(fields, values: dict) -> None:
+def _controls(fields, values: dict, memory=None) -> None:
     columns = st.columns(2)
     for index, (field, label, help_text, minimum, maximum, step) in enumerate(fields):
         key = f"{_WIDGET_PREFIX}{field}"
-        values[field] = columns[index % 2].number_input(
-            label, min_value=minimum, max_value=maximum, step=step,
-            key=key, help=help_text,
-        )
+        render = columns[index % 2].number_input
+        kwargs = dict(min_value=minimum, max_value=maximum, step=step, key=key, help=help_text)
+        values[field] = (memory.widget(render, label, value=type(minimum)(values[field]), **kwargs)
+                         if memory else render(label, **kwargs))
 
 
 def _analyze_history(frame: pl.DataFrame, *, as_of: datetime | None, config: TrendConfig):
@@ -120,30 +120,41 @@ def _analyze_history(frame: pl.DataFrame, *, as_of: datetime | None, config: Tre
 
 def render_trend_controls(frame: pl.DataFrame, *, timeframe: str, identity: object,
                           as_of: datetime | None = None,
-                          settings_path: Path | str | None = None):
+                          settings_path: Path | str | None = None, memory=None):
     """Return only a completed result matching these bars and applied settings.
 
     A new source selection requires an explicit Apply. Ordinary chart reruns
     reuse the current result; computation never follows chart viewport changes.
     """
     path_identity = str(Path(settings_path).resolve()) if settings_path is not None else "default"
+    if memory:
+        path_identity += ":" + memory.scope
     state = st.session_state.get(_STATE_KEY)
     if (state is None or state["path"] != path_identity
             or state.get("algorithm_version") != ALGORITHM_VERSION):
         loaded = load_trend_settings(settings_path)
-        state = {"path": path_identity, "applied": loaded.config, "algorithm_version": ALGORITHM_VERSION,
+        config = loaded.config
+        if memory and "applied_config" in memory.values:
+            try:
+                config = TrendConfig.from_dict(memory.values["applied_config"])
+            except (TypeError, ValueError):
+                st.warning("Saved workspace trend settings are invalid; using the saved trend defaults.")
+        state = {"path": path_identity, "applied": config, "algorithm_version": ALGORITHM_VERSION,
                  "warning": loaded.warning, "cache": OrderedDict(), "result_key": None}
         st.session_state[_STATE_KEY] = state
-        _set_form_values(loaded.config)
+        _set_form_values(config)
 
-    if not st.checkbox("Analyze trends", key="analyze-trends"):
-        _set_form_values(state["applied"])
+    enabled = (memory.widget(st.checkbox, "Analyze trends", key="analyze-trends") if memory else
+               st.checkbox("Analyze trends", key="analyze-trends"))
+    if not enabled:
+        if memory is None:
+            _set_form_values(state["applied"])
         return None
 
     # After a page switch Streamlit can restore an old, pre-widget value under
     # a user key. The action button disappearing tells us the form was removed;
     # reseed the whole form from the separately retained applied configuration.
-    if "_trend_restore_defaults" not in st.session_state:
+    if memory is None and "_trend_restore_defaults" not in st.session_state:
         _set_form_values(state["applied"])
 
     if state["warning"]:
@@ -162,6 +173,10 @@ def render_trend_controls(frame: pl.DataFrame, *, timeframe: str, identity: obje
         else:
             state.update(applied=defaults, warning=None, result_key=None)
             _set_form_values(defaults)
+            if memory:
+                memory.values.update(applied_config=defaults.to_dict(), analysis_key=None)
+                memory.values["widgets"].update({f"{_WIDGET_PREFIX}{name}": value
+                                                 for name, value in defaults.to_dict().items()})
             st.success("Default trend settings restored and saved. Apply and analyze to update the results.")
 
     # Streamlit removes widget state when its checkbox/containing page is hidden.
@@ -177,29 +192,34 @@ def render_trend_controls(frame: pl.DataFrame, *, timeframe: str, identity: obje
     # Preserve retired fields in older saved configurations while allowing the
     # current form to update all active settings.
     values = dict(applied_values)
-    with st.form("trend_configuration"):
+    with (st.container() if memory else st.form("trend_configuration")):
         st.markdown("**Interval discovery**")
-        _controls(_DISCOVERY, values)
+        _controls(_DISCOVERY, values, memory)
         st.markdown("**Acceptance**")
-        _controls(_ACCEPTANCE, values)
+        _controls(_ACCEPTANCE, values, memory)
         st.markdown("**Chart display**")
-        _controls(_DISPLAY, values)
-        values["redundancy_boundary_rule"] = st.selectbox(
-            "Boundary matching rule", options=tuple(_BOUNDARY_RULE_LABELS),
-            format_func=_BOUNDARY_RULE_LABELS.get, key=_BOUNDARY_RULE_KEY,
-            help="Both boundaries (AND) requires the start and end differences to fall within tolerance. "
-                 "Either boundary (OR) requires only one. OR can hide nested trends sharing a start or end, "
-                 "even at 0%. Only intervals with the same direction can be redundant.",
-        )
-        with st.expander("Advanced trend settings"):
+        _controls(_DISPLAY, values, memory)
+        rule_options = dict(options=tuple(_BOUNDARY_RULE_LABELS),
+                            format_func=_BOUNDARY_RULE_LABELS.get, key=_BOUNDARY_RULE_KEY,
+                            help="Both boundaries (AND) requires the start and end differences to fall within tolerance. "
+                                 "Either boundary (OR) requires only one. OR can hide nested trends sharing a start or end, "
+                                 "even at 0%. Only intervals with the same direction can be redundant.")
+        values["redundancy_boundary_rule"] = (
+            memory.widget(st.selectbox, "Boundary matching rule",
+                          index=tuple(_BOUNDARY_RULE_LABELS).index(applied_values["redundancy_boundary_rule"]),
+                          **rule_options) if memory else st.selectbox("Boundary matching rule", **rule_options))
+        with (memory.widget(st.expander, "Advanced trend settings", key="trend-advanced-open") if memory else
+              st.expander("Advanced trend settings")):
             for title, fields in (("Evidence weights", _WEIGHTS),
                                   ("Boundary robustness", _BOUNDARIES),
                                   ("Tail diagnosis", _TAILS)):
                 st.markdown(f"**{title}**")
-                _controls(fields, values)
-        submitted = st.form_submit_button("Apply and analyze", type="primary")
+                _controls(fields, values, memory)
+        submitted = (st.button("Apply and analyze", type="primary") if memory else
+                     st.form_submit_button("Apply and analyze", type="primary"))
 
-    with st.expander("Fixed λ grid preview"):
+    with (memory.widget(st.expander, "Fixed λ grid preview", key="trend-grid-open") if memory else
+          st.expander("Fixed λ grid preview")):
         try:
             preview = penalty_grid(TrendConfig.from_dict(values))
         except (TypeError, ValueError):
@@ -223,6 +243,8 @@ def render_trend_controls(frame: pl.DataFrame, *, timeframe: str, identity: obje
                 # Saving valid settings succeeds independently of analysis. Never
                 # leave a result from the previous settings visible on failure.
                 state.update(applied=config, warning=None, result_key=None)
+                if memory:
+                    memory.values.update(applied_config=config.to_dict(), analysis_key=None)
                 try:
                     key = _result_key(frame, timeframe=timeframe, identity=identity,
                                       as_of=as_of, config=config)
@@ -232,6 +254,11 @@ def render_trend_controls(frame: pl.DataFrame, *, timeframe: str, identity: obje
                     while len(state["cache"]) > _CACHE_LIMIT:
                         state["cache"].popitem(last=False)
                     state["result_key"] = key
+                    if memory:
+                        try:
+                            memory.save_analysis(key, state["cache"][key])
+                        except (OSError, TypeError, ValueError) as exc:
+                            st.warning(f"Analysis is available in this session but could not be saved for reopening: {exc}")
                 except Exception as exc:
                     # Keep market data and chart navigation usable when an
                     # optional analysis fails, including unexpected engine errors.
@@ -239,6 +266,16 @@ def render_trend_controls(frame: pl.DataFrame, *, timeframe: str, identity: obje
 
     current_key = _result_key(frame, timeframe=timeframe, identity=identity,
                               as_of=as_of, config=state["applied"])
+    if memory and current_key != state["result_key"] and memory.values.get("analysis_key") == current_key:
+        restored = state["cache"].get(current_key)
+        if restored is None:
+            restored = memory.load_analysis(current_key, state["applied"])
+        if restored is not None:
+            state["cache"][current_key] = restored
+            state["cache"].move_to_end(current_key)
+            while len(state["cache"]) > _CACHE_LIMIT:
+                state["cache"].popitem(last=False)
+            state["result_key"] = current_key
     if current_key != state["result_key"]:
         state["result_key"] = None
         st.info("Apply and analyze to calculate trends for the current data and settings.")
@@ -260,7 +297,7 @@ def _with_lambda_labels(table: pl.DataFrame) -> pl.DataFrame:
 
 
 def render_trend_results(result, *, selection: TrendSelection | None = None,
-                         show_redundant: bool = False, chart_trend_ids: set[str] | None = None) -> None:
+                         show_redundant: bool = False, chart_trend_ids: set[str] | None = None, memory=None) -> None:
     """Distinguish chart intervals, retained redundancies, and uncertain candidates."""
     if result is None:
         return
@@ -296,10 +333,10 @@ def render_trend_results(result, *, selection: TrendSelection | None = None,
                "to lowest clarity. Display selection may change as history grows; "
                "the underlying historical results stay available here.")
     if show_redundant:
-        st.caption("Redundant intervals are eligible for display, subject to the λ filter. They keep their Redundant status "
-                   "and representative reference; On chart indicates current visibility.")
+        st.caption("Redundant intervals are eligible for display, subject to the λ and slope filters. "
+                   "They keep their Redundant status and representative reference; On chart indicates current visibility.")
     if chart_trend_ids != eligible_ids:
-        st.caption("The λ filter hides nonmatching lines only. All interval results remain in the table; "
+        st.caption("The λ and slope filters hide nonmatching lines only. All interval results remain in the table; "
                    "On chart reflects current visibility.")
     st.caption("Line color identifies the smallest numeric λ that discovered the interval. Hover and table list "
                "every λ; every endpoint uses the same configured grid. Tail-derived intervals use a gray dashed line "
@@ -340,6 +377,7 @@ def render_trend_results(result, *, selection: TrendSelection | None = None,
             "bars": st.column_config.NumberColumn("Bars"),
             "clarity": st.column_config.NumberColumn("Clarity", format="%.3f"),
             "rate_per_bar": st.column_config.NumberColumn("Fitted %/bar", format="%.4f"),
+            "slope": st.column_config.NumberColumn("Slope (log-price per bar)", format="%.10g"),
             "boundary_robustness": st.column_config.NumberColumn("Boundary robustness", format="%.3f"),
             "magnitude": st.column_config.NumberColumn("Normalized slope", format="%.3f"),
             "tail_status": st.column_config.TextColumn("Tail status"),
@@ -349,10 +387,12 @@ def render_trend_results(result, *, selection: TrendSelection | None = None,
                 help="The interval starts at the earliest bar available to its endpoint analysis; the true start could be earlier.",
             ),
         })
-    with st.expander("Applied trend settings"):
+    with (memory.widget(st.expander, "Applied trend settings", key="trend-applied-open") if memory else
+          st.expander("Applied trend settings")):
         st.caption(f"Algorithm version: {result.algorithm_version}")
         st.json(result.config.to_dict())
-    with st.expander("Uncertain intervals"):
+    with (memory.widget(st.expander, "Uncertain intervals", key="trend-uncertain-open") if memory else
+          st.expander("Uncertain intervals")):
         st.caption("These candidates did not pass the analysis acceptance gates. They are distinct from "
                    "redundant intervals, which passed but match a displayed representative under the applied "
                    "boundary matching rule and tolerance.")

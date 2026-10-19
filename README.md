@@ -84,6 +84,27 @@ Launch the dashboard from the repository root:
 python -m streamlit run src/dashboard/app.py
 ```
 
+### Saved Market data workspace
+
+Market data automatically remembers its provider, ticker search and selection,
+series/timeframe, revision, date window, timezone, analysis toggle, λ and slope
+filters, original-bar page, and expanded sections. Returning from another page
+or reopening the dashboard restores those controls. Trend parameter edits are
+saved when committed in their inputs, even before **Apply and analyze**; the
+chart and results continue to use the last applied parameters.
+
+Each data directory has a separate workspace in `.local/market_workspaces/`.
+The latest successful analysis is saved as compressed JSON and restored without
+recomputation only when the source contents, selection, applied parameters, and
+algorithm version still match. Changed data requires **Apply and analyze**.
+Unavailable saved selections fall back to available options. Sidebar data and
+runs directories are remembered too. These project-local files are ignored by Git.
+
+Chart zoom, pan, and drag mode are remembered in the same browser for the most
+recent 32 chart identities. Reopening the same data at the same dashboard address
+restores that view; a changed dataset starts a fresh view. Browser storage must
+be available for chart-view persistence.
+
 ### Causal historical trend analysis
 
 On **Market data**, enable **Analyze trends**, adjust the prefilled settings if
@@ -132,6 +153,15 @@ as **No segmentation λ (tail-derived)**. The filter applies after redundancy
 selection and never reruns analysis or changes line colors. All results remain
 in the table, with **On chart** reflecting visibility and **Filtered out** marking
 hidden non-redundant intervals.
+**Slope filter** defaults to **All slopes**. Choose **Positive slopes** (`slope > 0`),
+**Negative slopes** (`slope < 0`), or **Custom range** with inclusive minimum and
+maximum bounds. Bounds use signed fitted **log-price change per source bar**, shown
+in the table and hover; this differs from the unsigned **Normalized slope** score.
+For example, `0.001` corresponds to approximately `+0.10005%` per bar. Custom bounds
+are retained when switching modes; zero matches only All slopes or a range containing
+zero. A trend must pass both the λ and slope filters and the redundancy visibility
+setting. Changes update overlays without rerunning analysis or resetting chart
+navigation. Invalid ranges show an error and hide overlays until corrected.
 
 Intervals carry all numerical **lambda (λ)** penalties that discovered their
 boundaries, together with their penalty-grid levels. A single boundary can be
@@ -158,7 +188,8 @@ provenance when its inputs and configuration are unchanged.
 
 The applied settings are saved atomically in `.local/trend_config.json` relative
 to this checkout, shared across tickers and dashboard sessions. They survive
-restarts and are Git-ignored. Unapplied form edits are not saved. **Restore trend
+restarts and are Git-ignored. Market data also saves unapplied parameter edits in
+its workspace; they take effect only after **Apply and analyze**. **Restore trend
 defaults** persists the defaults and invalidates the previous analysis. Invalid
 saved settings produce a warning instead of being silently overwritten. If two
 dashboard sessions save settings, the last save wins; each displayed analysis

@@ -70,6 +70,7 @@ def trend_descriptors(trends):
                  f"End: {escape(_stamp(_field(trend, 'end_time')))}",
                  f"Duration: {_field(trend, 'duration')} bars",
                  f"Clarity: {_field(trend, 'clarity', 0):.3f}",
+                 f"Slope (log-price per bar): {slope:+.10g}",
                  f"Fitted rate/bar: {_field(trend, 'rate_per_bar', 0):+.4%}",
                  f"Boundary robustness: {_field(trend, 'boundary_robustness', 0):.1%}",
                  f"Normalized magnitude: {_field(trend, 'magnitude', 0):.3f}",

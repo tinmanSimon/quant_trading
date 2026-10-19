@@ -28,6 +28,24 @@ def filter_trends_by_lambda(trends, selected_lambdas=None, *, include_without_la
                  or (include_without_lambda and not trend.lambda_values))
 
 
+def filter_trends_by_slope(trends, mode="all", *, minimum=None, maximum=None):
+    """Filter original fits by signed log-price slope per bar, inclusively for ranges."""
+    if mode not in ("all", "positive", "negative", "range"):
+        raise ValueError("Unknown slope filter mode.")
+    if mode == "range":
+        if any(isinstance(value, bool) or not isinstance(value, (int, float))
+               or not math.isfinite(value) for value in (minimum, maximum)):
+            raise ValueError("Slope bounds must be finite numbers.")
+        if minimum > maximum:
+            raise ValueError("Minimum slope must be less than or equal to maximum slope.")
+    if mode == "all":
+        return tuple(trends)
+    return tuple(trend for trend in trends if
+                 (mode == "positive" and trend.slope > 0)
+                 or (mode == "negative" and trend.slope < 0)
+                 or (mode == "range" and minimum <= trend.slope <= maximum))
+
+
 def select_trends(
     trends, *, redundancy_percentage: float = 5.0,
     redundancy_boundary_rule: str = "and",

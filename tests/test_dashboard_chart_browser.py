@@ -228,7 +228,7 @@ def test_chart_browser_interactions(tmp_path, single, latest):
 
 
 def _run_browser_document(tmp_path, document=None, *, url=None, browser_js=None, screenshot_path=None,
-                          timeout_seconds=45):
+                          timeout_seconds=45, native_clicks=False):
     browser = next((found for name in ("google-chrome", "chromium", "chromium-browser")
                     if (found := shutil.which(name))), None)
     assert browser, "Install Chrome/Chromium to run --run-browser tests."
@@ -290,6 +290,14 @@ def _run_browser_document(tmp_path, document=None, *, url=None, browser_js=None,
                 deadline = time.monotonic() + timeout_seconds
                 result = "PENDING"
                 while time.monotonic() < deadline:
+                    if native_clicks:
+                        pending = command("Runtime.evaluate", expression="window.__testClick", returnByValue=True)
+                        point = pending.get("result", {}).get("value")
+                        if point:
+                            command("Input.dispatchMouseEvent", type="mouseMoved", **point)
+                            command("Input.dispatchMouseEvent", type="mousePressed", button="left", clickCount=1, **point)
+                            command("Input.dispatchMouseEvent", type="mouseReleased", button="left", clickCount=1, **point)
+                            command("Runtime.evaluate", expression="delete window.__testClick")
                     state = command("Runtime.evaluate", expression='document.getElementById("result")?.textContent',
                                     returnByValue=True)
                     result = state.get("result", {}).get("value", "PENDING")
@@ -340,10 +348,28 @@ async function test() {
         mount(response);
     }
     mount(fixtures.latest);
-    await until(() => host.querySelector(".js-plotly-plot")?.layout?.yaxis?.autorange === false,
-                "initial window did not render");
+    await until(() => localStorage.getItem("test-view-reload")
+        ? Boolean(host.querySelector(".js-plotly-plot")?.layout)
+        : host.querySelector(".js-plotly-plot")?.layout?.yaxis?.autorange === false,
+        "initial window did not render");
     const chart = host.querySelector(".js-plotly-plot");
     const count = fixtures.latest.total_count;
+    if (localStorage.getItem("test-view-reload")) {
+        await until(() => calls.length > 0, "reloaded page did not request its saved view");
+        const request = calls.at(-1);
+        check(close(request.start, 2010) && close(request.end, 2020), "reload lost local-only zoom");
+        const response = structuredClone(fixtures["2000"]);
+        response.request_id = request.request_id;
+        response.view_range = [request.start, request.end];
+        mount(response);
+        await until(() => close(chart.layout.xaxis.range[0], 2010)
+            && close(chart.layout.xaxis.range[1], 2020)
+            && chart.data[0].x[0] < 2010, "reload did not restore saved bars and range");
+        check(chart.layout.dragmode === "pan", "reload lost chart drag mode");
+        localStorage.removeItem("test-view-reload");
+        result.textContent = "PASS";
+        return;
+    }
     function bounded() {
         check(chart.data[0].x.length <= 2000, "browser accumulated too many candles");
         check(chart.data[1].x.length === chart.data[0].x.length, "volume window differs from price window");
@@ -457,8 +483,18 @@ async function test() {
     await pause(350);
     check(host.children.length === 0, "dynamic chart was not removed on unmount");
     check(calls.length === callsBeforeUnmount, "unmount left a delayed navigation request running");
+    mount(fixtures.latest);
+    await until(() => calls.length > callsBeforeUnmount, "remount did not request the saved viewport");
+    const restoredChart = host.querySelector(".js-plotly-plot");
+    request = calls.at(-1);
+    check(close(request.start, 1999.5) && close(request.end, 2049.5), "remount forgot pending navigation");
+    reply(request, "2000");
+    await until(() => restoredChart.data[0].x[0] < 2000, "remount did not load the earlier window");
+    await Plotly.relayout(restoredChart, {"xaxis.range": [2010, 2020], dragmode: "pan"});
+    await until(() => close(restoredChart.layout.xaxis.range[0], 2010), "local zoom did not settle");
     check(!asynchronousError, "late chart error: " + asynchronousError);
-    result.textContent = "PASS";
+    localStorage.setItem("test-view-reload", "1");
+    window.location.reload();
 }
 window.addEventListener("unhandledrejection", event => {
     asynchronousError = event.reason?.stack || String(event.reason);

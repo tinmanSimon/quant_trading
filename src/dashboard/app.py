@@ -15,8 +15,9 @@ from dashboard.chart_component import render_series_chart
 from dashboard.deletion import deletion_page
 from dashboard.strategy_controls import strategy_specs
 from dashboard.trend_input import completed_prefix
-from dashboard.trend_selection import filter_trends_by_lambda, select_trends
+from dashboard.trend_selection import filter_trends_by_lambda, filter_trends_by_slope, select_trends
 from dashboard.trends import render_trend_controls, render_trend_results
+from dashboard.workspace import market_memory
 from research import PreflightError, Research, ResearchError
 from research.backtesting import ExecutionSettings
 from research.timeframes import BACKTEST_TIMEFRAMES, INTRADAY_DURATIONS, fetch_timeframes
@@ -31,12 +32,13 @@ def _tickers(text: str, provider: str = "yahoo") -> list[str]:
     return list(dict.fromkeys(item.upper() if provider == "yahoo" else item for item in items))
 
 
-def _provider_choice(names, *, key, result_key=None):
+def _provider_choice(names, *, key, result_key=None, memory=None):
     names = sorted(set(names))
     if not names:
         st.info("No providers are available here. Fetching requires a registered provider; browsing and backtesting require local datasets.")
         return None
-    provider = st.selectbox("Provider", names, key=key)
+    provider = (memory.widget(st.selectbox, "Provider", options=names, key=key) if memory else
+                st.selectbox("Provider", names, key=key))
     if result_key and st.session_state.get(f"{key}-previous") != provider:
         st.session_state.pop(result_key, None)
     st.session_state[f"{key}-previous"] = provider
@@ -44,12 +46,16 @@ def _provider_choice(names, *, key, result_key=None):
 
 
 def _date_fields(prefix: str, *, first: date | None = None, last: date | None = None,
-                 intraday: bool = False):
+                 intraday: bool = False, memory=None):
     left, right = st.columns(2)
     first = first or date.today() - timedelta(days=30)
     last = last or date.today()
-    start = left.date_input("Start date (UTC, inclusive)", first, key=f"{prefix}-start")
-    end = right.date_input("End date (UTC, exclusive)", last, key=f"{prefix}-end")
+    if memory:
+        start = memory.widget(left.date_input, "Start date (UTC, inclusive)", value=first, key=f"{prefix}-start")
+        end = memory.widget(right.date_input, "End date (UTC, exclusive)", value=last, key=f"{prefix}-end")
+    else:
+        start = left.date_input("Start date (UTC, inclusive)", first, key=f"{prefix}-start")
+        end = right.date_input("End date (UTC, exclusive)", last, key=f"{prefix}-end")
     if intraday:
         start_time = left.time_input("Start time (UTC)", time.min, step=60, key=f"{prefix}-start-time")
         end_time = right.time_input("End time (UTC)", time.min, step=60, key=f"{prefix}-end-time")
@@ -115,31 +121,42 @@ def _chart_csv(pipeline, query, dataset_id=None):
 
 
 def _data_page(research: Research):
+    memory = market_memory(str(Path(research.pipeline.store.data_dir).resolve()))
+    try:
+        _render_data_page(research, memory)
+    finally:
+        memory.save()
+        if memory.warning:
+            st.warning(memory.warning)
+
+
+def _render_data_page(research: Research, memory):
     st.title("Market data")
     st.caption("Explore stored bars and their revisions. All chart values come from the verified local data.")
-    layer = st.radio("Layer", ["raw", "processed"], horizontal=True)
-    include_history = st.checkbox("Include historical revisions")
+    layer = memory.widget(st.radio, "Layer", options=["raw", "processed"], horizontal=True, key="browse-layer")
+    include_history = memory.widget(st.checkbox, "Include historical revisions", key="browse-history")
     items = research.pipeline.list_datasets(DataQuery(layer=layer, include_history=include_history))
     if not items:
         st.info("No matching local datasets. Open Fetch to download your first batch.")
         return
-    provider = _provider_choice((item.request.provider for item in items), key="browse-provider")
+    provider = _provider_choice((item.request.provider for item in items), key="browse-provider", memory=memory)
     items = [item for item in items if item.request.provider == provider]
-    search = st.text_input("Find a ticker", placeholder="AAPL")
+    search = memory.widget(st.text_input, "Find a ticker", placeholder="AAPL", key="browse-search")
     symbols = sorted({item.request.symbol for item in items if search.upper() in item.request.symbol.upper()})
     if not symbols:
         st.info("No tickers match this search.")
         return
-    symbol = st.selectbox("Ticker", symbols)
+    symbol = memory.widget(st.selectbox, "Ticker", options=symbols, key="browse-symbol")
     symbol_items = [item for item in items if item.request.symbol == symbol]
     identities = sorted({(item.request.provider, item.request.timeframe, item.pipeline_id) for item in symbol_items})
-    identity = st.selectbox("Data series", identities,
+    identity = memory.widget(st.selectbox, "Data series", options=identities, key="browse-series",
                             format_func=lambda value: f"{value[0]} · {value[1]}" + (f" · pipeline {value[2][:12]}" if value[2] else ""))
     matching = [item for item in symbol_items
                 if (item.request.provider, item.request.timeframe, item.pipeline_id) == identity]
-    mode = st.radio("Read", ["Active batches together", "One exact revision"], horizontal=True)
+    mode = memory.widget(st.radio, "Read", options=["Active batches together", "One exact revision"],
+                        horizontal=True, key="browse-read")
     if mode == "One exact revision":
-        selected_id = st.selectbox("Revision", [item.dataset_id for item in matching],
+        selected_id = memory.widget(st.selectbox, "Revision", options=[item.dataset_id for item in matching], key="browse-revision",
                                   format_func=lambda value: next(
                                       f"{item.dataset_id[:12]} · {item.first_timestamp.date()} to {item.last_timestamp.date()} · "
                                       f"{'active' if item.active else 'historical'}"
@@ -153,8 +170,9 @@ def _data_page(research: Research):
     lower = min(item.first_timestamp for item in selected)
     upper = max(item.last_timestamp for item in selected)
     window_key = f"browse-{symbol}-{identity}-{mode}-{selected[0].dataset_id if mode == 'One exact revision' else 'active'}"
-    start, end = _date_fields(window_key, first=lower.date(), last=(upper + timedelta(days=1)).date())
-    timezone = st.selectbox("Display timezone (intraday bars)", ["America/New_York", "UTC", "Asia/Shanghai"])
+    start, end = _date_fields(window_key, first=lower.date(), last=(upper + timedelta(days=1)).date(), memory=memory)
+    timezone = memory.widget(st.selectbox, "Display timezone (intraday bars)",
+                             options=["America/New_York", "UTC", "Asia/Shanghai"], key="browse-timezone")
     if start >= end:
         st.error("The end must be later than the start.")
         return
@@ -176,9 +194,9 @@ def _data_page(research: Research):
     session_timezone = "America/New_York"
     series = cache.load(research.pipeline, query, dataset_id=dataset_id, timeframe=identity[1],
                         session_timezone=session_timezone, omitted_timestamps=omitted)
-    with st.expander("Dataset metadata"):
+    with memory.widget(st.expander, "Dataset metadata", key="browse-metadata-open"):
         st.dataframe(pl.DataFrame(_metadata_rows(selected)), hide_index=True)
-    show_details = bool(omitted) and st.checkbox("Show omission details", key="browse-omission-details")
+    show_details = bool(omitted) and memory.widget(st.checkbox, "Show omission details", key="browse-omission-details")
     _quality(selected, start, end, present_timestamps=series.timestamps if series else (),
              show_details=show_details)
     if series is None:
@@ -187,7 +205,7 @@ def _data_page(research: Research):
     chart_id = sha256(repr((str(research.pipeline.store.data_dir), query, dataset_id,
                            tuple(item.to_json() for item in sorted(selected, key=lambda item: item.dataset_id)),
                            timezone, session_timezone)).encode()).hexdigest()
-    st.caption(f"{series.total_count:,} original bars available · opens on the latest {min(series.total_count, 50)} · "
+    st.caption(f"{series.total_count:,} original bars available · new views start on the latest {min(series.total_count, 50)} · "
                "zoom out for a grouped overview or zoom in for original bars. Stored values are unchanged; gaps are not filled.")
     st.caption("Display grouping uses America/New_York trading dates for U.S. stocks, including stored extended-hours bars. "
                "Daily and calendar-week summaries are labelled on the chart.")
@@ -205,15 +223,17 @@ def _data_page(research: Research):
     show_redundant = False
     selected_lambdas = None
     include_without_lambda = False
-    with st.container():
-        trend_result = render_trend_controls(trend_frame, timeframe=identity[1], identity=trend_identity)
+    slope_mode, slope_minimum, slope_maximum = "all", None, None
+    trend_controls = st.container()
+    with trend_controls:
+        trend_result = render_trend_controls(trend_frame, timeframe=identity[1], identity=trend_identity, memory=memory)
         if trend_result is not None:
-            show_redundant = st.checkbox(
+            show_redundant = memory.widget(st.checkbox,
                 "Show redundant intervals", key="show-redundant-trends",
                 help="Show all accepted intervals, including redundancies. Uses the existing analysis; "
                      "redundant intervals keep their classification in the table.",
             )
-            show_all_lambdas = st.checkbox("Show all λ values", value=True, key="show-all-trend-lambdas")
+            show_all_lambdas = memory.widget(st.checkbox, "Show all λ values", value=True, key="show-all-trend-lambdas")
             if not show_all_lambdas:
                 no_lambda = "No segmentation λ (tail-derived)"
                 options = sorted({value for trend in trend_result.trends for value in trend.lambda_values})
@@ -223,7 +243,7 @@ def _data_page(research: Research):
                 if filter_key in st.session_state:
                     st.session_state[filter_key] = [value for value in st.session_state[filter_key]
                                                     if value in options]
-                selected = st.multiselect(
+                selected = memory.widget(st.multiselect,
                     "λ values", options=options, key=filter_key,
                     format_func=lambda value: value if isinstance(value, str) else f"λ = {value!r}",
                     help="Match any λ that discovered an interval. Select nothing to hide all lines. "
@@ -232,6 +252,30 @@ def _data_page(research: Research):
                 )
                 selected_lambdas = {value for value in selected if value != no_lambda}
                 include_without_lambda = no_lambda in selected
+            slope_labels = {"all": "All slopes", "positive": "Positive slopes",
+                            "negative": "Negative slopes", "range": "Custom range"}
+            slope_mode = memory.widget(st.selectbox,
+                "Slope filter", options=list(slope_labels), format_func=slope_labels.get,
+                key="selected-trend-slope-mode",
+                help="Filter signed fitted slope in log-price per source bar. Positive means > 0; "
+                     "negative means < 0. Custom ranges include both bounds. Trends must also match "
+                     "the λ filter and redundancy visibility setting.",
+            )
+            if slope_mode == "range":
+                slopes = [trend.slope for trend in trend_result.trends]
+                lower, upper = st.columns(2)
+                with lower:
+                    slope_minimum = memory.widget(st.number_input,
+                        "Minimum slope (log-price per bar)",
+                        value=min(slopes, default=0.0),
+                        step=0.000001, format="%.10g", key="_trend-slope-minimum",
+                    )
+                with upper:
+                    slope_maximum = memory.widget(st.number_input,
+                        "Maximum slope (log-price per bar)",
+                        value=max(slopes, default=0.0),
+                        step=0.000001, format="%.10g", key="_trend-slope-maximum",
+                    )
         if st.session_state.get("analyze-trends") and trend_frame.height < series.total_count:
             st.caption(f"Trend analysis excludes {series.total_count - trend_frame.height} potentially unfinished bars. "
                        "Intraday bars wait their full nominal duration; calendar bars wait until their labelled "
@@ -249,6 +293,17 @@ def _data_page(research: Research):
         chart_trends = trend_result.trends
     chart_trends = filter_trends_by_lambda(chart_trends, selected_lambdas,
                                           include_without_lambda=include_without_lambda)
+    try:
+        chart_trends = filter_trends_by_slope(chart_trends, slope_mode,
+                                            minimum=slope_minimum, maximum=slope_maximum)
+    except ValueError as exc:
+        chart_trends = ()
+        with trend_controls:
+            st.error(str(exc))
+    else:
+        if trend_result is not None and trend_result.trends and not chart_trends:
+            with trend_controls:
+                st.info("No trends match the current chart filters.")
     trend_signature = repr((chart_id, chart_trends))
     if st.session_state.get("trend-overlay-signature") != trend_signature:
         st.session_state["trend-overlay-signature"] = trend_signature
@@ -259,10 +314,10 @@ def _data_page(research: Research):
                         overlay_revision=st.session_state.get("trend-overlay-revision", 0))
     if trend_result is not None:
         render_trend_results(trend_result, selection=trend_selection, show_redundant=show_redundant,
-                            chart_trend_ids={trend.trend_id for trend in chart_trends})
-    if st.checkbox("Show original bars", key="browse-show-original-bars"):
+                            chart_trend_ids={trend.trend_id for trend in chart_trends}, memory=memory)
+    if memory.widget(st.checkbox, "Show original bars", key="browse-show-original-bars"):
         pages = (series.total_count + 499) // 500
-        page = st.number_input("Original bar page", min_value=1, max_value=pages, value=pages,
+        page = memory.widget(st.number_input,"Original bar page", min_value=1, max_value=pages, value=pages,
                                step=1, key=f"browse-original-page-{chart_id}")
         first_row = (page - 1) * 500
         frame = series.frame.slice(first_row, 500)
@@ -438,8 +493,12 @@ def main():
     st.set_page_config(page_title="Quant research", page_icon="📈", layout="wide")
     with st.sidebar:
         st.title("Quant research")
-        data_dir = st.text_input("Data directory", "data")
-        runs_dir = st.text_input("Research runs directory", "runs")
+        directories = market_memory("dashboard-directories")
+        data_dir = directories.widget(st.text_input, "Data directory", value="data", key="data-directory")
+        runs_dir = directories.widget(st.text_input, "Research runs directory", value="runs", key="runs-directory")
+        directories.save()
+        if directories.warning:
+            st.warning(directories.warning)
         st.caption(f"Data: {Path(data_dir).expanduser().resolve()}")
         page = st.radio("Navigate", ["Market data", "Fetch", "Backtest", "Saved runs", "Delete data"])
         st.caption("Local data · reproducible research")

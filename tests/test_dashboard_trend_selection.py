@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from dashboard.trend_selection import filter_trends_by_lambda, select_trends
+from dashboard.trend_selection import filter_trends_by_lambda, filter_trends_by_slope, select_trends
 
 
 def test_lambda_filter_matches_any_provenance_and_preserves_original_intervals():
@@ -251,3 +251,45 @@ def test_custom_minimum_and_larger_percentage_both_apply(rule):
 def test_invalid_minimum_rejected(value):
     with pytest.raises(ValueError, match="redundancy_min_bars"):
         select_trends((), redundancy_min_bars=value)
+
+
+@pytest.mark.parametrize("mode, bounds, expected", [
+    ("all", {}, [-.002, -.001, 0., .001, .002]),
+    ("positive", {}, [.001, .002]),
+    ("negative", {}, [-.002, -.001]),
+    ("range", {"minimum": -.001, "maximum": .001}, [-.001, 0., .001]),
+    ("range", {"minimum": .001, "maximum": .002}, [.001, .002]),
+    ("range", {"minimum": -.002, "maximum": -.001}, [-.002, -.001]),
+    ("range", {"minimum": 0., "maximum": 0.}, [0.]),
+    ("range", {"minimum": .003, "maximum": .004}, []),
+])
+def test_slope_filter_signed_ranges_and_original_records(mode, bounds, expected):
+    archive = tuple(SimpleNamespace(slope=value) for value in [-.002, -.001, 0., .001, .002])
+    result = filter_trends_by_slope(iter(archive), mode, **bounds)
+    assert [item.slope for item in result] == expected
+    assert all(any(item is original for original in archive) for item in result)
+    assert filter_trends_by_slope((), mode, **bounds) == ()
+
+
+@pytest.mark.parametrize("minimum, maximum", [
+    (1., -1.), (None, 1.), (0., None), (float("nan"), 1.),
+    (0., float("inf")), (float("-inf"), 0.), (True, 1.), (0., "1"),
+])
+def test_slope_filter_rejects_invalid_bounds_even_for_empty_results(minimum, maximum):
+    with pytest.raises(ValueError, match="slope|Slope"):
+        filter_trends_by_slope((), "range", minimum=minimum, maximum=maximum)
+
+
+def test_slope_filter_rejects_unknown_mode():
+    with pytest.raises(ValueError, match="mode"):
+        filter_trends_by_slope((), "unknown")
+
+
+def test_slope_filter_combines_with_lambda_and_tail_visibility():
+    up = SimpleNamespace(slope=.001, lambda_values=(.1, .2))
+    down = SimpleNamespace(slope=-.001, lambda_values=(.2,))
+    tail = SimpleNamespace(slope=-.002, lambda_values=())
+    archive = (up, down, tail)
+    eligible = filter_trends_by_lambda(archive, {.2}, include_without_lambda=True)
+    assert filter_trends_by_slope(eligible, "negative") == (down, tail)
+    assert filter_trends_by_slope(filter_trends_by_lambda(archive, {.1}), "negative") == ()

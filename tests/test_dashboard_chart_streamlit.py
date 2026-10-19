@@ -184,6 +184,43 @@ STREAMLIT_INTERACTIONS = r"""
             && chart.querySelector(".hoverlayer").textContent.includes("Color λ:"),
             "actual dashboard trend hover lacks metrics or lambda labels");
         Plotly.Fx.unhover(chart);
+        const originalTrends = visibleTraces().slice();
+        const ids = traces => traces.map(trace => trace.meta.trend_id).sort().join(",");
+        // React Aria controls require native browser input rather than DOM .click().
+        async function nativeClick(element) {
+            element.scrollIntoView({block: "center"});
+            const box = element.getBoundingClientRect();
+            window.__testClick = {x: box.x + box.width / 2, y: box.y + box.height / 2};
+            await until(() => !window.__testClick, "native click was not delivered");
+        }
+        async function chooseSlope(label) {
+            const control = [...document.querySelectorAll('[data-testid="stSelectbox"]')]
+                .find(item => item.textContent.includes("Slope filter"));
+            check(control, "missing slope filter");
+            await nativeClick(control.querySelector('button[aria-haspopup="listbox"]'));
+            await until(() => [...document.querySelectorAll('[role="option"]')]
+                .some(item => item.textContent.trim() === label), "slope options did not open");
+            await nativeClick([...document.querySelectorAll('[role="option"]')]
+                .find(item => item.textContent.trim() === label));
+        }
+        for (const label of ["Negative slopes", "Positive slopes", "Custom range", "All slopes"]) {
+            const expected = originalTrends.filter(trace => label === "Negative slopes"
+                ? trace.y.at(-1) < trace.y[0]
+                : label === "Positive slopes" ? trace.y.at(-1) > trace.y[0] : true);
+            await chooseSlope(label);
+            await until(() => ids(visibleTraces()) === ids(expected)
+                && (label === "Custom range") === Boolean(document.querySelector(
+                    'input[aria-label="Minimum slope (log-price per bar)"]'))
+                && !document.querySelector('[data-test-script-state="running"]'),
+                "slope filter did not update chart: " + label);
+            if (label === "Custom range") {
+                check(document.querySelector('input[aria-label="Minimum slope (log-price per bar)"]'),
+                      "custom slope bounds did not appear");
+            }
+            check(chart.layout.xaxis.range.every((value, index) => close(value, trendRange[index])),
+                  "slope filter reset local zoom");
+            verify();
+        }
         button("All history").click();
         await until(() => close(chart.layout.xaxis.range[0], -0.5)
             && chart.data[0].x.length <= 1000 && visibleTraces().length > 100,
@@ -259,8 +296,9 @@ def test_chart_streamlit_window_round_trips(tmp_path):
                                    redundancy_boundary_rule="or"), settings_path)
     app.write_text(
         "import streamlit as st\nfrom dashboard.app import _data_page\nfrom research import Research\n"
-        "from pathlib import Path\nimport dashboard.trend_settings as settings\n"
+        "from pathlib import Path\nimport dashboard.trend_settings as settings\nimport dashboard.workspace as workspace\n"
         f"settings.DEFAULT_SETTINGS_PATH = Path({str(settings_path)!r})\n"
+        f"workspace.DEFAULT_DIRECTORY = Path({str(tmp_path / 'workspaces')!r})\n"
         "st.set_page_config(layout='wide')\n"
         f"_data_page(Research({str(root)!r}, runs_dir={str(tmp_path / 'runs')!r}))\n",
         encoding="utf-8",
@@ -296,7 +334,7 @@ def test_chart_streamlit_window_round_trips(tmp_path):
             assert ready, log.read()
             _run_browser_document(tmp_path, url=f"http://127.0.0.1:{port}",
                                   browser_js=STREAMLIT_INTERACTIONS,
-                                  screenshot_path=tmp_path / "chart-window.png", timeout_seconds=120)
+                                  screenshot_path=tmp_path / "chart-window.png", timeout_seconds=120, native_clicks=True)
             assert load_trend_settings(settings_path).config == TrendConfig()
         finally:
             process.terminate()

@@ -104,6 +104,43 @@ def test_market_page_applies_saved_settings_and_hides_stale_results(tmp_path, mo
     assert len(filtered) == len(all_results)
     assert filtered["redundant_to"].equals(all_results["redundant_to"])
     assert len(analysis_calls) == calls_before_toggle
+    assert app.selectbox(key="selected-trend-slope-mode").value == "all"
+    for mode, expected in (("positive", expected_ids), ("negative", set())):
+        app.selectbox(key="selected-trend-slope-mode").select(mode).run()
+        assert not app.exception and not app.error
+        assert {trend.trend_id for trend in rendered_trends[-1]} == expected
+        visible = next(table.value for table in app.dataframe if "trend_id" in table.value.columns)
+        assert set(visible.loc[visible["on_chart"], "trend_id"]) == expected
+        assert visible.drop(columns=["on_chart", "status"]).equals(
+            all_results.drop(columns=["on_chart", "status"]))
+        assert len(analysis_calls) == calls_before_toggle
+    assert any("No trends match" in item.value for item in app.info)
+    app.selectbox(key="selected-trend-slope-mode").select("range").run()
+    # Exact inclusive bounds, combined with lambda filtering.
+    slope = all_trends[0].slope
+    app.number_input(key="_trend-slope-minimum").set_value(slope)
+    app.number_input(key="_trend-slope-maximum").set_value(slope).run()
+    exact_ids = {trend.trend_id for trend in all_trends
+                 if trend.slope == slope and selected_lambda in trend.lambda_values}
+    assert exact_ids
+    assert {trend.trend_id for trend in rendered_trends[-1]} == exact_ids
+    visible = next(table.value for table in app.dataframe if "trend_id" in table.value.columns)
+    assert set(visible.loc[visible["on_chart"], "slope"]) == {slope}
+    # Invalid ranges hide overlays, retain the archive, and can be corrected.
+    app.number_input(key="_trend-slope-minimum").set_value(slope + .01).run()
+    assert not app.exception
+    assert any("Minimum slope" in item.value for item in app.error)
+    assert not rendered_trends[-1]
+    app.number_input(key="_trend-slope-minimum").set_value(-.01)
+    app.number_input(key="_trend-slope-maximum").set_value(.01).run()
+    assert not app.exception and not app.error
+    assert {trend.trend_id for trend in rendered_trends[-1]} == expected_ids
+    app.selectbox(key="selected-trend-slope-mode").select("all").run()
+    app.selectbox(key="selected-trend-slope-mode").select("range").run()
+    assert app.number_input(key="_trend-slope-minimum").value == -.01
+    assert app.number_input(key="_trend-slope-maximum").value == .01
+    assert len(analysis_calls) == calls_before_toggle
+    app.selectbox(key="selected-trend-slope-mode").select("all").run()
     app.checkbox(key="show-all-trend-lambdas").check().run()
     assert rendered_trends[-1] == all_trends
     assert len(analysis_calls) == calls_before_toggle

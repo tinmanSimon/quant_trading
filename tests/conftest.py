@@ -88,3 +88,9 @@ def sample_ohlcv_frame(sample_ohlcv_records: list[dict[str, object]]) -> pl.Data
             for column in ("open", "high", "low", "close", "volume")
         ],
     )
+
+
+@pytest.fixture(autouse=True)
+def isolate_dashboard_workspace(tmp_path, monkeypatch):
+    from dashboard import workspace
+    monkeypatch.setattr(workspace, "DEFAULT_DIRECTORY", tmp_path / "market_workspaces")

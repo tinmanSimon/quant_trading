@@ -19,7 +19,19 @@ export default function render({parentElement, data, setStateValue}) {
     let payload = data, send = setStateValue;
     const count = dynamic ? data.total_count : data.figure.data[0].x.length;
     const fullRange = [-0.5, count - 0.5];
-    let range = boundedRange(data.view_range || data.figure.layout.xaxis.range);
+    const viewStorageKey = "quant-market-chart-views-v1";
+    function storedViews() {
+        try {
+            const saved = JSON.parse(localStorage.getItem(viewStorageKey) || "[]");
+            return Array.isArray(saved) ? saved : [];
+        } catch (_) { return []; }
+    }
+    const savedView = dynamic ? storedViews().find(item => item?.chart_id === chartId) : null;
+    const savedRange = Array.isArray(savedView?.range) && savedView.range.length === 2
+        && savedView.range.every(Number.isFinite) && savedView.range[0] < savedView.range[1]
+        ? savedView.range : null;
+    let range = boundedRange(savedRange || data.view_range || data.figure.layout.xaxis.range);
+    if (savedView && ["zoom", "pan"].includes(savedView.dragmode)) data.figure.layout.dragmode = savedView.dragmode;
     let wanted = range.slice();
     let latestRequested = data.request_id || 0, applied = latestRequested;
     let overlayRevision = data.overlay_revision || 0;
@@ -183,8 +195,19 @@ export default function render({parentElement, data, setStateValue}) {
             || budget < resolutionBudget * 0.7 || budget > resolutionBudget * 1.5;
     }
 
+    function rememberView() {
+        if (!dynamic) return;
+        try {
+            const views = storedViews().filter(item => item?.chart_id !== chartId);
+            views.unshift({chart_id: chartId, range: wanted.slice(),
+                dragmode: chart.layout?.dragmode || payload.figure.layout.dragmode});
+            localStorage.setItem(viewStorageKey, JSON.stringify(views.slice(0, 32)));
+        } catch (_) { /* Storage restrictions must not disable chart navigation. */ }
+    }
+
     function navigate(target) {
         wanted = boundedRange(target);
+        rememberView();
         clearTimeout(timer);
         // Invalidate in-flight responses immediately, including during debounce.
         if (needsWindow(wanted)) {
@@ -286,6 +309,7 @@ export default function render({parentElement, data, setStateValue}) {
     function onRelayout(event) {
         // Our own fitting emits a relayout too; it is not a user gesture.
         if ("xaxis.tickvals" in event) return;
+        if ("dragmode" in event) rememberView();
         for (const axis of ["xaxis", "xaxis2"]) {
             if (event[axis + ".autorange"]) {
                 navigate(fullRange);
@@ -357,6 +381,7 @@ export default function render({parentElement, data, setStateValue}) {
             {...payload.config, responsive: false, doubleClick: "reset"}).then(() => {
             if (disposed) return;
             chart.on("plotly_relayout", onRelayout);
+            if (savedRange) navigate(wanted);
             queueFit();
             observer = new ResizeObserver(() => {
                 if (disposed || chart.clientWidth === 0) return;
@@ -371,7 +396,10 @@ export default function render({parentElement, data, setStateValue}) {
     }
 
     parentElement.__quantChart = {update, dispose};
-    if (dynamic) makeControls();
+    if (dynamic) {
+        payload = withOverlays(payload);
+        makeControls();
+    }
     if (window.Plotly) start();
     else window.addEventListener("quant-plotly-ready", start);
     return dispose;
