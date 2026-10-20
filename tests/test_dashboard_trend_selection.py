@@ -29,7 +29,7 @@ def trend(start, end, clarity=1.0, direction=1, *, trend_id=None, lambda_levels=
                            trend_id=trend_id or f"{start}-{end}-{direction}", lambda_levels=lambda_levels)
 
 
-def test_default_clarity_selection_uses_five_percent_and_both_boundaries():
+def test_default_chronological_selection_uses_five_percent_and_both_boundaries():
     clear = trend(10, 109, .95)
     redundant = trend(15, 114, .8)
     different_start = trend(16, 108, .7)
@@ -43,7 +43,7 @@ def test_default_clarity_selection_uses_five_percent_and_both_boundaries():
     assert [vars(item) for item in archive] == original_values
 
 
-@pytest.mark.parametrize("rule, shorter_bounds", [("and", (10, 89)), ("or", (5, 24))])
+@pytest.mark.parametrize("rule, shorter_bounds", [("and", (20, 109)), ("or", (95, 114))])
 def test_tolerance_uses_shorter_interval_even_when_longer_was_picked(rule, shorter_bounds):
     broad = trend(0, 99)
     shorter = trend(*shorter_bounds, .8)
@@ -81,8 +81,9 @@ def test_either_rule_matches_one_close_boundary_where_both_rule_does_not(nearby)
     first, second = trend(0, 149), trend(*nearby, .8)
     assert select_trends((first, second)).chart_trends == (first, second)
     selected = select_trends((first, second), redundancy_boundary_rule="or")
-    assert selected.chart_trends == (first,)
-    assert selected.redundant_to == {second.trend_id: first.trend_id}
+    winner, redundant = (second, first) if second.end_index < first.end_index else (first, second)
+    assert selected.chart_trends == (winner,)
+    assert selected.redundant_to == {redundant.trend_id: winner.trend_id}
 
 
 @pytest.mark.parametrize("rule", ["and", "or"])
@@ -137,25 +138,56 @@ def test_zero_percentage_matches_exact_boundaries_using_selected_rule(rule):
     }
 
 
-def test_ties_prefer_duration_then_later_endpoint_then_id_and_ignore_input_order():
-    shorter = trend(1, 20, trend_id="short")
-    earlier = trend(0, 20, trend_id="earlier")
-    later_z = trend(1, 21, trend_id="Z")
-    later_a = trend(1, 21, trend_id="A")
-    archive = (shorter, earlier, later_z, later_a)
+@pytest.mark.parametrize("rule", ["and", "or"])
+def test_earliest_endpoint_wins_over_clarity_duration_and_onset(rule):
+    first = trend(10, 29, .7)
+    later = trend(9, 30, .99)
+    for archive in ((first, later), (later, first)):
+        selected = select_trends(archive, redundancy_boundary_rule=rule)
+        assert selected.chart_trends == (first,)
+        assert selected.redundant_to == {later.trend_id: first.trend_id}
+
+
+def test_same_endpoint_ties_prefer_clarity_then_duration_then_id_regardless_of_input_order():
+    less_clear = trend(0, 20, .8, trend_id="less_clear")
+    shorter = trend(2, 20, .9, trend_id="short")
+    clear_z = trend(1, 20, .9, trend_id="Z")
+    clear_a = trend(1, 20, .9, trend_id="A")
+    archive = (shorter, less_clear, clear_z, clear_a)
     selected = select_trends(archive)
     for ordering in permutations(archive):
         assert select_trends(ordering) == selected
-    assert selected.chart_trends == (later_a,)
-    assert selected.redundant_to == {item.trend_id: "A" for item in archive if item is not later_a}
+    assert selected.chart_trends == (clear_a,)
+    assert selected.redundant_to == {item.trend_id: "A" for item in archive if item is not clear_a}
+
+
+@pytest.mark.parametrize("rule, second_end, last_end", [("and", 100, 104), ("or", 107, 110)])
+def test_if_close_to_two_representatives_choose_the_earliest_one(rule, second_end, last_end):
+    first = trend(0, 99, .7)
+    clearer = trend(8, second_end, .9)
+    last = trend(4, last_end, .99)
+    selected = select_trends((clearer, last, first), redundancy_boundary_rule=rule)
+    assert selected.chart_trends == (first, clearer)
+    assert selected.redundant_to == {last.trend_id: first.trend_id}
 
 
 @pytest.mark.parametrize("rule", ["and", "or"])
-def test_if_close_to_two_representatives_choose_the_highest_ranked_one(rule):
-    clear, less_clear, between = trend(0, 99, .95), trend(8, 107, .9), trend(4, 103, .8)
-    selected = select_trends((less_clear, between, clear), redundancy_boundary_rule=rule)
-    assert selected.chart_trends == (clear, less_clear)
-    assert selected.redundant_to == {between.trend_id: clear.trend_id}
+@pytest.mark.parametrize("percentage, minimum", [(0, 0), (0, 5), (5, 5), (100, 0)])
+def test_appending_future_endpoints_preserves_every_earlier_selection(rule, percentage, minimum):
+    rng = random.Random(147)
+    archive = tuple(trend(rng.randrange(end - 6), end, rng.choice((.7, .8, .99)),
+                          rng.choice((-1, 1)), trend_id=f"T{index}")
+                    for index, end in enumerate(rng.randrange(10, 150) for _ in range(200)))
+    settings = dict(redundancy_boundary_rule=rule, redundancy_percentage=percentage,
+                    redundancy_min_bars=minimum)
+    full = select_trends(archive, **settings)
+    by_id = {item.trend_id: item for item in archive}
+    for cutoff in (30, 60, 100, 140):
+        prefix = tuple(item for item in archive if item.end_index <= cutoff)
+        selected = select_trends(prefix, **settings)
+        assert selected.chart_trends == tuple(item for item in full.chart_trends if item.end_index <= cutoff)
+        assert selected.redundant_to == {key: value for key, value in full.redundant_to.items()
+                                         if by_id[key].end_index <= cutoff}
 
 
 def test_long_history_both_rule_keeps_distinct_updates_and_either_rule_collapses_shared_start():
@@ -168,7 +200,7 @@ def test_long_history_both_rule_keeps_distinct_updates_and_either_rule_collapses
         redundant, representative = by_id[redundant_id], by_id[representative_id]
         assert abs(redundant.end_index - representative.end_index) <= max(
             5, .05 * min(redundant.duration, representative.duration))
-    assert select_trends(archive, redundancy_boundary_rule="or").chart_trends == (archive[-1],)
+    assert select_trends(archive, redundancy_boundary_rule="or").chart_trends == (archive[0],)
 
 
 def test_custom_percentage_and_empty_archive():
@@ -202,7 +234,7 @@ def test_vectorized_selection_matches_independent_scalar_greedy_oracle(percentag
         archive.append(trend(start, start + rng.randrange(7, 500), rng.choice((.6, .8, .9)),
                              rng.choice((-1, 1)), trend_id=f"T{index}"))
     expected_retained, expected_redundant = [], {}
-    ranked = sorted(archive, key=lambda item: (-item.clarity, -item.duration, -item.end_index, item.trend_id))
+    ranked = sorted(archive, key=lambda item: (item.end_index, -item.clarity, -item.duration, item.trend_id))
     for item in ranked:
         for representative in expected_retained:
             if item.direction != representative.direction:

@@ -431,3 +431,20 @@ def test_minimum_resolution_changes_selection_and_is_applied_only_on_submit(tren
     _apply(app)
     assert list(app.dataframe[0].value["status"]) == ["On chart", "On chart"]
     assert load_trend_settings(source.path).config.redundancy_min_bars == 0
+
+
+def test_earlier_lower_clarity_trend_is_the_display_representative(trend_page):
+    app, source, _ = trend_page
+    source.trends += (SimpleNamespace(trend_id="early", start_index=1, end_index=38,
+                                     duration=38, clarity=.8, direction=1),)
+    _enable(app)
+    _apply(app)
+    displayed = app.dataframe[0].value.set_index("trend_id")
+    assert displayed.loc["early", "status"] == "On chart"
+    assert displayed.loc["T1", "status"] == "Redundant"
+    assert displayed.loc["T1", "redundant_to"] == "early"
+    assert any("Selection proceeds by earliest ending bar" in item.value for item in app.caption)
+    app.run()
+    assert not app.exception
+    assert len(source.calls) == 1
+    assert app.dataframe[0].value.set_index("trend_id").loc["T1", "redundant_to"] == "early"

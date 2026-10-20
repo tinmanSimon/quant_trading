@@ -1,7 +1,8 @@
 """Display distinct causal trend records while retaining the complete archive.
 
-This is presentation only. Selection can change when the archive grows; every
-underlying interval retains the result computed at its own endpoint.
+This is presentation only. With unchanged settings and earlier records, appending
+later endpoints cannot replace earlier selections. Every underlying interval
+retains the result computed at its own endpoint.
 """
 
 from dataclasses import dataclass
@@ -51,7 +52,11 @@ def select_trends(
     redundancy_boundary_rule: str = "and",
     redundancy_min_bars: int = 5,
 ) -> TrendSelection:
-    """Keep the clearest representative of nearby same-direction intervals.
+    """Keep the earliest-ending representative of nearby same-direction intervals.
+
+    Process completed endpoints chronologically. Within one endpoint, prefer
+    higher clarity, then longer duration, then interval ID. A later endpoint
+    never replaces an earlier representative.
 
     The tolerance is a percentage of the shorter interval's inclusive bar count,
     without rounding, with a configurable minimum in bars. The boundary rule
@@ -73,7 +78,7 @@ def select_trends(
         raise ValueError("redundancy_min_bars must be a nonnegative integer")
 
     ranked = sorted(trends, key=lambda item: (
-        -item.clarity, -item.duration, -item.end_index, item.trend_id,
+        item.end_index, -item.clarity, -item.duration, item.trend_id,
     ))
     # Pair-dependent tolerances cannot use the old fixed-width spatial buckets.
     # Vectorize comparisons with retained representatives for large archives.
@@ -94,7 +99,7 @@ def select_trends(
         close = starts_close & ends_close if redundancy_boundary_rule == "and" else starts_close | ends_close
         matches = close & (directions[:count] == item.direction)
         if matches.any():
-            # Retained order is clarity rank, so the first match is the best one.
+            # Retained order is chronological, with deterministic same-endpoint ties.
             representative = retained[int(matches.argmax())]
             redundant_to[item.trend_id] = representative.trend_id
         else:

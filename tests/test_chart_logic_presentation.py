@@ -125,3 +125,60 @@ def test_metadata_signature_does_not_construct_optional_plugins():
     registry.register_class(BrokenConstructor)
     assert registry.definition("broken_constructor", "1").result_version == "archive-2"
     assert isinstance(_signature(registry), str)
+
+
+def test_saved_trend_archive_uses_earliest_endpoint_without_recalculation(monkeypatch):
+    from dataclasses import replace
+    import json
+
+    from chart_logics.plugins import trend as module
+    from trend_analysis import analyze
+
+    frame = pl.DataFrame({
+        "timestamp": [datetime(2024, 1, day, tzinfo=UTC) for day in range(1, 13)],
+        "close": [100.0 + index for index in range(12)],
+    })
+    analysis = analyze(frame)
+    earliest_end = min(item.end_index for item in analysis.trends)
+    early = replace(next(item for item in analysis.trends if item.end_index == earliest_end), clarity=.8)
+    late = replace(next(item for item in analysis.trends
+                        if item.end_index == earliest_end + 1 and item.start_index == early.start_index),
+                   clarity=.99)
+    analysis = replace(analysis, trends=(late, early))
+    calls = []
+
+    def calculate_once(*args, **kwargs):
+        calls.append(1)
+        return analysis
+
+    monkeypatch.setattr(module, "analyze", calculate_once)
+    registry = LogicRegistry()
+    registry.register_class(module.TrendLogic)
+    runner = LogicRunner(registry)
+    context = LogicContext(frame, "1d", "chronological", datetime(2025, 1, 1, tzinfo=UTC))
+    run = runner.apply([LogicSpec("trend", module.TrendLogic.name, module.TrendLogic.version, {})], context)
+    assert not run.errors
+    assert calls == [1]
+    snapshot = json.loads(json.dumps(runner.snapshot(run)))
+
+    def unexpected_calculation(*args, **kwargs):
+        raise AssertionError("Presenting a saved archive must not recalculate trends")
+
+    monkeypatch.setattr(module.TrendLogic, "calculate", unexpected_calculation)
+    restarted = LogicRunner(registry)
+    restored = restarted.restore(snapshot, context)
+    assert restored is not None
+    displayed = restarted.present(restored)
+    assert not displayed.errors
+    result = displayed.results["trend"]
+    assert [overlay["id"] for overlay in result.overlays] == [early.trend_id]
+    rows = {row["trend_id"]: row for row in result.tables[0]["rows"]}
+    assert rows[early.trend_id]["on_chart"] is True
+    assert rows[early.trend_id]["redundant_to"] is None
+    assert rows[late.trend_id]["status"] == "Redundant"
+    assert rows[late.trend_id]["redundant_to"] == early.trend_id
+    expanded = restarted.present(restored, {"trend": {"show_redundant": True}})
+    assert not expanded.errors
+    assert len(expanded.results["trend"].overlays) == 2
+    assert restarted.snapshot(restored) == snapshot
+    assert calls == [1]

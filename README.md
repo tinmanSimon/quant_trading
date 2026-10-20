@@ -387,9 +387,13 @@ both start and end differences to be within the resolution, or **or**, which req
 share a start or end, even at 0%. With both the percentage and minimum set to
 zero, AND only matches identical boundaries and OR matches either exact boundary.
 
-Selection is greedy in descending clarity order; ties favor longer intervals,
-then later endpoints, then the interval ID. A candidate matching any already
-retained interval becomes redundant and references the highest-ranked match.
+Selection is greedy in chronological order of the ending bar. Within the same
+ending bar, ties favor higher clarity, then longer intervals, then the interval
+ID. A candidate matching any already retained interval becomes redundant and
+references the earliest-ending match, using the same tie-breakers. With unchanged
+settings and earlier records, appending later endpoints cannot replace earlier
+selections, even when a later trend has higher clarity. Trends become available
+after their ending bar closes; chart timestamps label bar starts.
 Only retained representatives participate, so matches never chain through a
 redundant interval. This display choice does not refit, merge, or rewrite any
 analysis. The table retains every accepted

@@ -59,7 +59,7 @@ _TAILS = (
 )
 _DISPLAY = (
     ("redundancy_min_bars", "Minimum redundancy resolution (bars)", "The boundary tolerance is the larger of this minimum and the configured percentage of the shorter interval. Applies to both AND and OR. Set to zero to use only the percentage.", 0, None, 1),
-    ("redundancy_percentage", "Redundancy tolerance (%)", "For each pair, calculate this percentage of the shorter interval's length, including both endpoint bars, then use the larger of that value and the minimum resolution in bars. Boundary differences are compared directly without rounding. Intervals are considered from highest to lowest clarity; an interval matching a selected same-direction representative stays in the table as redundant.", 0.0, 100.0, 0.5),
+    ("redundancy_percentage", "Redundancy tolerance (%)", "For each pair, calculate this percentage of the shorter interval's length, including both endpoint bars, then use the larger of that value and the minimum resolution in bars. Boundary differences are compared directly without rounding. Intervals are considered by earliest ending bar, with higher clarity, longer duration, then interval ID breaking same-bar ties; an interval matching a selected same-direction representative stays in the table as redundant.", 0.0, 100.0, 0.5),
 )
 _ALL_FIELDS = _DISCOVERY + _ACCEPTANCE + _WEIGHTS + _BOUNDARIES + _TAILS + _DISPLAY
 _BOUNDARY_RULE_LABELS = {"and": "Both boundaries (AND)", "or": "Either boundary (OR)"}
@@ -329,9 +329,10 @@ def render_trend_results(result, *, selection: TrendSelection | None = None,
                f"{display_description} {boundary_match} within the larger of "
                f"{result.config.redundancy_min_bars} bars and "
                f"{result.config.redundancy_percentage:g}% of the shorter interval's inclusive bar count "
-               "relative to an already selected same-direction representative. Selection proceeds from highest "
-               "to lowest clarity. Display selection may change as history grows; "
-               "the underlying historical results stay available here.")
+               "relative to an already selected same-direction representative. Selection proceeds by earliest ending bar, "
+               "then higher clarity, longer duration, and interval ID for same-bar ties. With unchanged "
+               "settings and earlier records, later endpoints cannot replace earlier selections. "
+               "The underlying historical results stay available here.")
     if show_redundant:
         st.caption("Redundant intervals are eligible for display, subject to the λ and slope filters. "
                    "They keep their Redundant status and representative reference; On chart indicates current visibility.")
