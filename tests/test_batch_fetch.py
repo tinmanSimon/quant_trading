@@ -53,7 +53,12 @@ def test_pipeline_batch_continues_after_failure_and_preserves_values_and_quality
     assert [request.symbol for request in provider.requests] == ["AAPL", "BAD", "MSFT"]
     assert [item.status for item in report.outcomes] == ["saved", "failed", "saved"]
     assert report.outcomes[1] == FetchOutcome("BAD", "failed", error_type="RuntimeError",
-                                             error_message="vendor unavailable")
+                                             error_message="vendor unavailable", requested_start=bounds["start"],
+                                             requested_end=bounds["end"], fetch_start=bounds["start"],
+                                             fetch_end=bounds["end"], fetch_ranges=({
+                                                 "start": bounds["start"].isoformat(),
+                                                 "end": bounds["end"].isoformat(),
+                                                 "status": "failed", "row_count": 0},))
     assert not report.ok
     reopened = DataPipeline(pipeline.store.data_dir)
     assert len(reopened.list_datasets()) == 2
@@ -66,7 +71,10 @@ def test_pipeline_batch_continues_after_failure_and_preserves_values_and_quality
         expected = provider.frame.with_columns(pl.lit(outcome.ticker).alias("symbol"))
         assert_frame_equal(reopened.read_dataset(metadata.dataset_id), expected)
     table = report.to_frame()
-    assert table.columns == ["ticker", "status", "row_count", "dataset_ids", "error_type", "error_message", "quality"]
+    assert table.columns == ["ticker", "status", "row_count", "dataset_ids", "error_type", "error_message", "quality",
+                             "requested_start", "requested_end", "fetch_start", "fetch_end",
+                             "first_timestamp", "last_timestamp", "replaced_dataset_ids",
+                             "fetch_ranges", "fetched_row_count", "warning_message"]
     assert table["ticker"].to_list() == ["AAPL", "BAD", "MSFT"]
     assert json.loads(table["quality"][0]) == report.outcomes[0].quality
     assert table["quality"][1] is None
@@ -148,7 +156,7 @@ def test_standalone_pipeline_function_accepts_a_ticker_generator(setup):
 def test_empty_report_preserves_table_schema():
     report = BatchFetchReport(())
     assert report.ok
-    assert report.to_frame().shape == (0, 7)
+    assert report.to_frame().shape == (0, 17)
     assert report.to_frame().schema["row_count"] == pl.Int64
 
 

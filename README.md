@@ -31,9 +31,11 @@ quant-research fetch --tickers AAPL MSFT --timeframe 1d \
 
 Omitting `--skip-missing-ohlc` keeps strict Yahoo validation. Enabling it records
 each wholly missing OHLC bar's UTC timestamp and reason alongside its immutable
-dataset revision; missing volume is never silently changed to zero. Existing
-overlapping data raises an error instead of being overwritten. Fetch requests
-still obey Yahoo's availability/retention limits.
+dataset revision; missing volume is never silently changed to zero. By default,
+existing overlapping data raises an error instead of being overwritten. The
+optional policies described below can skip covered requests, refresh overlapping
+ranges, or fetch only missing portions and merge locally. Fetch requests still
+obey Yahoo's availability/retention limits.
 
 Batch fetching can also be used directly without creating a research service:
 
@@ -59,6 +61,63 @@ ticker is saved independently, even if another fails. Call
 `pipeline.fetch_many(...)` (or `research.pipeline.fetch_many(...)` when using a
 research service), and import reports directly from `data_pipeline`.
 Invalid batch options raise `InvalidDataRequestError`.
+
+`overlap_policy="error"` is the default. Use
+`pipeline.fetch_many(..., overlap_policy="refresh_overlap")` to skip requests
+whose entire range is already covered by matching active raw datasets, without
+contacting the vendor. For a partial overlap, the pipeline expands the fetch to
+the union of the request and all overlapping datasets, including any additional
+datasets reached by that expansion. A successful validated response becomes
+one active raw revision, retaining the old revisions as history. For example,
+a request for October 1–10 overlapping stored October 6–15 fetches October 1–15
+instead. API date bounds remain inclusive-start/exclusive-end.
+
+Use `pipeline.fetch_many(..., overlap_policy="fetch_missing")` to download only
+the uncovered portions of the original requested range. Fully covered requests
+are skipped without a vendor call. For example, existing October 1–10 plus a
+request for October 1–15 downloads only October 11–15 (with API end bounds still
+exclusive). Downloaded bars are merged locally with overlapping or adjacent
+active datasets into one new revision. Existing bar values remain unchanged;
+the old revisions stay readable by ID. Multiple missing ranges are requested
+separately, while the combined result is published atomically after all requests
+and validations finish. Any failed range leaves the original datasets active.
+An empty range is recorded and other ranges continue: if all return no bars,
+nothing is published; if some return bars, those bars are saved with a warning
+identifying the empty ranges. No prices or bars are invented for those gaps.
+After a merge, an empty internal gap is inside the combined first-to-last span
+and is considered covered on subsequent requests; empty leading or trailing
+ranges remain outside stored coverage.
+
+Coverage starts at the actual first stored timestamp and extends through one
+nominal bar interval after the last timestamp (calendar months for monthly bars),
+not through the original request bounds. Daily and longer bars use date labels;
+coverage does not infer exchange sessions, holidays, or shortened closing bars.
+Gaps between these spans remain uncovered, while this option does not detect
+missing bars inside a dataset's first-to-last interval. Each new revision must
+contain every previously stored timestamp it supersedes. In refresh mode, failed
+or empty responses and incomplete replacements leave the old datasets active.
+Concurrent conflicts are reported without overwriting another writer's updates.
+Processed datasets derived from replaced inputs become inactive and need
+rebuilding in either optional mode.
+
+Reports distinguish `saved`, `refreshed`, `merged`, `skipped`, `empty`, and `failed`.
+They include requested bounds, returned first/last timestamps, replaced dataset
+IDs, and `fetch_ranges`, a JSON list of exact planned vendor ranges and their
+statuses (`pending`, `fetching`, `fetched`, `empty`, or `failed`). `fetch_start/end`
+is the envelope of these ranges; it does not imply that intervening stored data
+was downloaded again or that a pending range was attempted after an earlier
+failure. `row_count` is the total size of the saved revision, while
+`fetched_row_count` counts newly downloaded bars. `warning_message` identifies
+empty ranges when other ranges succeeded. For a skipped request, `dataset_ids`
+lists the covering datasets and both row counts are zero.
+
+The dashboard shows each ticker's planned vendor ranges before downloading and
+updates their status as requests finish. Python callers can pass
+`progress=callback` to receive the same events: `ticker`, one-based `index`,
+`total`, `status`, requested bounds, and `fetch_ranges` with ISO start/end bounds,
+status, and downloaded `row_count`. Progress reporting does not change storage
+validation or publication.
+
 The dashboard and `quant-research fetch` use the pipeline API directly.
 As with other research source changes, this refactor changes the code fingerprint
 recorded in new backtests. Existing runs remain readable; comparisons still
@@ -587,8 +646,17 @@ registered. Each view or backtest uses one provider; histories are never combine
 across providers. Yahoo’s missing-OHLC option appears only for Yahoo. New adapters
 should declare `supported_timeframes` and be registered before launching the dashboard.
 
-In the dashboard, select **Fetch**, choose a provider, bar size and UTC bounds, and save
-the data. Then select **Backtest**, choose the same bar size, tickers and
+In the dashboard, select **Fetch**, choose a provider, bar size and UTC bounds,
+and choose **Existing data**. **Fail on overlap** preserves the default behavior.
+**Skip covered requests; refresh overlapping ranges** skips fully covered requests
+without a vendor call and refreshes the combined range for partial overlaps.
+**Fetch missing ranges; merge locally** requests only uncovered portions and
+combines them with existing bars without changing the existing values. Planned
+vendor ranges appear before each download. The report shows exact ranges and
+statuses, newly downloaded rows, total saved rows, returned coverage, and which
+datasets were replaced. Old revisions remain available by ID; any processed
+derivatives of replaced inputs need rebuilding. Then select **Backtest**, choose
+the same bar size, tickers and
 strategies, and set the test bounds. Intraday forms include UTC time inputs;
 the end is exclusive. The backtest page shows which tickers have local data
 at that interval, and preflight checks their actual coverage before execution.
@@ -1273,7 +1341,17 @@ Ordinary writes reject duplicate bars within a frame and overlapping actual
 first/last timestamp coverage within the same provider/symbol/timeframe/layer/
 processor identity. An overlap anywhere in that inclusive coverage is rejected,
 even if exact row keys differ. Non-overlapping batches can be appended. No
-implicit merge, upsert, deduplication or overwrite is performed.
+implicit merge, upsert, deduplication or overwrite is performed. The explicit
+`fetch_many(..., overlap_policy="refresh_overlap")` policy can refresh and extend
+an overlapping group as one new revision after validating that every old
+timestamp is retained. The new file is staged and verified before the catalog
+atomically activates it and retires its inputs; the old files remain as history.
+Fully covered requests are skipped first. The separate
+`overlap_policy="fetch_missing"` policy fetches uncovered ranges, then locally
+merges them with overlapping or adjacent raw datasets while preserving existing
+values. It uses the same atomic publication and historical revision protections.
+Neither policy changes ordinary write protection or the exact-range replacement
+command below.
 
 To refresh an existing entire raw batch, inspect it and then repeat its exact
 ID as confirmation:

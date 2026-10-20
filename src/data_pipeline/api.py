@@ -30,11 +30,13 @@ class DataPipeline:
 
     def fetch_many(self, tickers, *, start: datetime, end: datetime, timeframe="1d",
                    provider="yahoo", skip_missing_ohlc: bool | None = None,
-                   massive_request_interval_seconds: float | None = None) -> BatchFetchReport:
-        """Fetch and save every ticker independently, returning per-ticker outcomes."""
+                   massive_request_interval_seconds: float | None = None,
+                   overlap_policy: str = "error", progress=None) -> BatchFetchReport:
+        """Fetch tickers independently with strict, union-refresh, or missing-range merge policy."""
         return fetch_many(self, tickers=tickers, start=start, end=end, timeframe=timeframe,
                           provider=provider, skip_missing_ohlc=skip_missing_ohlc,
-                          massive_request_interval_seconds=massive_request_interval_seconds)
+                          massive_request_interval_seconds=massive_request_interval_seconds,
+                          overlap_policy=overlap_policy, progress=progress)
 
     def ingest(
         self, request: DataRequest, *, processors: Pipeline | Iterable[Processor] = (),

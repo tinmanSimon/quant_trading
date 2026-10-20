@@ -21,7 +21,7 @@ from ..exceptions import (
 from ..models import DataQuery, DataRequest
 from ..schemas import OHLCV_SCHEMA, validate_ohlcv
 from ..processing.contracts import DataContract
-from ..quality import FetchQuality, merge_quality
+from ..quality import FetchQuality, FetchResult, merge_quality
 from . import catalog
 from .deletion import DeletionPlan, DeletionReport
 from .layout import contained_path, relative_path
@@ -169,6 +169,104 @@ class LocalDataStore:
                 raise RequestDataMismatchError("Replacement must cover the entire target's first/last bar range.")
             return self._write(connection, old.request, canonical, layer="raw", supersedes=(dataset_id,),
                                quality=quality)
+
+    def refresh_raw(
+        self, request: DataRequest, frame: pl.DataFrame, *, supersedes: Sequence[str],
+        quality: FetchQuality | None = None,
+    ) -> StoredDataset:
+        """Publish a fetched range over exact active raw revisions atomically.
+
+        Vendor responses may revise prices or add bars, but must retain every
+        stored bar key from the selected revisions. Targets are checked again
+        under the publication lock, so a fetch planned against stale catalog
+        state cannot replace newer revisions. Originals remain readable history.
+        """
+        if (not isinstance(supersedes, Sequence) or isinstance(supersedes, (str, bytes))
+                or not supersedes
+                or any(not isinstance(key, str) or not key for key in supersedes)):
+            raise RequestDataMismatchError("Refresh requires a nonempty sequence of raw dataset IDs.")
+        target_ids = tuple(supersedes)
+        if len(set(target_ids)) != len(target_ids):
+            raise RequestDataMismatchError("Refresh target IDs must be distinct.")
+        canonical = _validate_batch(request, frame)
+        with self._session() as connection:
+            targets = [catalog.get(connection, key) for key in target_ids]
+            if any(not item.active or item.layer != "raw" for item in targets):
+                raise RequestDataMismatchError("Refresh requires active raw target revisions.")
+            if any(_identity(item.request) != _identity(request)
+                   or item.request.price_adjustment != request.price_adjustment for item in targets):
+                raise RequestDataMismatchError(
+                    "Refresh targets must match the request's dataset, provider, symbol, "
+                    "timeframe and price adjustment."
+                )
+            incoming_keys = canonical.select("symbol", "timestamp")
+            for item in targets:
+                original_keys = self._read_verified(item).select("symbol", "timestamp")
+                missing = original_keys.join(incoming_keys, on=["symbol", "timestamp"], how="anti")
+                if missing.height:
+                    raise RequestDataMismatchError(
+                        f"Refresh response omits {missing.height} existing bar(s) from dataset "
+                        f"{item.dataset_id}; existing data was preserved."
+                    )
+            return self._write(connection, request, canonical, layer="raw",
+                               supersedes=target_ids, quality=quality)
+
+    def merge_raw(
+        self, request: DataRequest, fetched: Sequence[tuple[DataRequest, FetchResult]], *,
+        supersedes: Sequence[str] = (),
+    ) -> StoredDataset:
+        """Atomically combine exact old revisions with fetched missing ranges.
+
+        Existing bars are copied unchanged from verified files. Each nonempty
+        response must fit its own disjoint gap request; requests cannot repair
+        holes inside a stored first-to-last span. All chunks publish together,
+        retaining originals as history and retiring their processed derivatives.
+        """
+        if not isinstance(request, DataRequest):
+            raise RequestDataMismatchError("A validated DataRequest is required.")
+        if (not isinstance(supersedes, Sequence) or isinstance(supersedes, (str, bytes))
+                or any(not isinstance(key, str) or not key for key in supersedes)):
+            raise RequestDataMismatchError("Merge targets must be a sequence of raw dataset IDs.")
+        target_ids = tuple(supersedes)
+        if len(set(target_ids)) != len(target_ids):
+            raise RequestDataMismatchError("Merge target IDs must be distinct.")
+        if (not isinstance(fetched, Sequence) or isinstance(fetched, (str, bytes)) or not fetched):
+            raise RequestDataMismatchError("Merge requires at least one fetched missing range.")
+        chunks = []
+        for pair in fetched:
+            if (not isinstance(pair, Sequence) or isinstance(pair, (str, bytes)) or len(pair) != 2
+                    or not isinstance(pair[0], DataRequest) or not isinstance(pair[1], FetchResult)):
+                raise RequestDataMismatchError("Each fetched range must contain a DataRequest and FetchResult.")
+            gap, result = pair
+            if (_identity(gap) != _identity(request)
+                    or gap.price_adjustment != request.price_adjustment):
+                raise RequestDataMismatchError("Fetched missing ranges must match the full request's identity.")
+            if gap.start < request.start or gap.end > request.end:
+                raise RequestDataMismatchError("Fetched missing ranges must lie inside the full request.")
+            chunks.append((gap, _validate_batch(gap, result.frame), result.quality))
+        chunks.sort(key=lambda chunk: (chunk[0].start, chunk[0].end))
+        if any(left[0].end > right[0].start for left, right in zip(chunks, chunks[1:])):
+            raise RequestDataMismatchError("Fetched missing-range requests must be disjoint.")
+        with self._session() as connection:
+            targets = [catalog.get(connection, key) for key in target_ids]
+            if any(not item.active or item.layer != "raw" for item in targets):
+                raise RequestDataMismatchError("Merge requires active raw target revisions.")
+            if any(_identity(item.request) != _identity(request)
+                   or item.request.price_adjustment != request.price_adjustment for item in targets):
+                raise RequestDataMismatchError("Merge targets must match the full request's identity.")
+            for gap, _, _ in chunks:
+                conflicts = [item.dataset_id for item in targets
+                             if gap.start <= item.last_timestamp and gap.end > item.first_timestamp]
+                if conflicts:
+                    raise RequestDataMismatchError(
+                        "Fetched missing-range requests overlap stored coverage: " + ", ".join(conflicts)
+                    )
+            original_frames = [self._read_verified(item) for item in targets]
+            combined = pl.concat(original_frames + [frame for _, frame, _ in chunks]).sort("symbol", "timestamp")
+            canonical = _validate_batch(request, combined)
+            quality = merge_quality([item.quality for item in targets] + [quality for _, _, quality in chunks])
+            return self._write(connection, request, canonical, layer="raw",
+                               supersedes=target_ids, quality=quality)
 
     def compact_raw(self, dataset_ids: list[str], *, confirm: list[str]) -> StoredDataset:
         """Merge whole batches; keep old revisions and retire their derivatives."""
