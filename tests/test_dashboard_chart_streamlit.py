@@ -139,29 +139,76 @@ STREAMLIT_INTERACTIONS = r"""
         const trendRange = [end - 20, end];
         await Plotly.relayout(chart, {"xaxis.range": trendRange});
         await until(() => close(chart.layout.xaxis.range[0], trendRange[0]), "trend local zoom did not finish");
-        function toggleTrends() {
-            const checkbox = document.querySelector('input[aria-label="Analyze trends"]');
-            check(checkbox, "missing Analyze trends checkbox");
-            checkbox.click();
+        // Selectors are generated from each module's schema. Native input is
+        // needed by the React Aria selectbox used by the actual Streamlit app.
+        async function nativeClick(element) {
+            check(element, "missing native-click target");
+            element.scrollIntoView({block: "center", behavior: "instant"});
+            await new Promise(requestAnimationFrame);
+            const box = element.getBoundingClientRect();
+            window.__testClick = {x: box.x + box.width / 2, y: box.y + box.height / 2};
+            await until(() => !window.__testClick, "native click was not delivered");
         }
-        function boundaryControl() {
+        function selectControl(title) {
             return [...document.querySelectorAll('[data-testid="stSelectbox"]')]
-                .find(item => item.textContent.includes("Boundary matching rule"));
+                .find(item => item.textContent.includes(title));
         }
-        const selectedBoundaryRule = () => boundaryControl()?.querySelector('[role="combobox"]')?.value;
-        toggleTrends();
-        await until(() => [...document.querySelectorAll('button')].some(item => item.textContent.trim() === "Apply and analyze"),
-                    "trend configuration form did not open");
+        async function choose(title, label) {
+            const control = selectControl(title);
+            check(control, "missing selectbox: " + title);
+            await nativeClick(control.querySelector('button[aria-haspopup="listbox"]'));
+            await until(() => [...document.querySelectorAll('[role="option"]')]
+                .some(item => item.textContent.trim() === label), "options did not open: " + title);
+            await nativeClick([...document.querySelectorAll('[role="option"]')]
+                .find(item => item.textContent.trim() === label));
+            await until(() => !document.querySelector('[role="listbox"]')
+                && !document.querySelector('[data-test-script-state="running"]'), "selection did not settle: " + title);
+        }
+        async function openSettingsGroup(label) {
+            const summary = () => [...document.querySelectorAll('[data-testid="stExpander"] summary')]
+                .find(item => item.textContent.includes(label));
+            check(summary(), "missing settings group: " + label);
+            if (!summary().closest("details").open) summary().click();
+            await until(() => summary()?.closest("details").open, "settings group did not open: " + label);
+        }
+        async function setCheckbox(label, value, scope = document) {
+            const input = () => [...scope.querySelectorAll('[data-testid="stCheckbox"]')]
+                .find(item => item.textContent.trim() === label)?.querySelector('input[type="checkbox"]');
+            check(input(), "missing checkbox: " + label);
+            if (input().checked !== value) input().click();
+            await pause(100);
+            await until(() => input()?.checked === value
+                && !document.querySelector('[data-test-script-state="running"]'),
+                "checkbox did not settle: " + label);
+        }
+        function displayCard(label) {
+            return [...document.querySelectorAll('[data-testid="stExpander"]')]
+                .find(item => item.querySelector("summary")?.textContent.includes(label));
+        }
+        const selectedBoundaryRule = () => selectControl("Boundary matching rule")
+            ?.querySelector('[role="combobox"]')?.value;
+        await choose("Available chart logic", "Trend analysis");
+        button("Add logic").click();
         await until(() => document.querySelector('input[aria-label="Maximum lookback per endpoint (bars)"]')?.value === "8",
                     "saved configuration did not load");
-        await until(() => Number(document.querySelector('input[aria-label="Redundancy tolerance (%)"]')?.value) === 25
-            && selectedBoundaryRule() === "Either boundary (OR)",
-            "saved redundancy percentage and boundary rule did not load");
-        button("Apply and analyze").click();
+        check(!selectControl("Slope filter")
+            && !document.querySelector('input[aria-label="Redundancy tolerance (%)"]'),
+            "display settings appeared before there was a calculated result");
+        button("Apply").click();
         await until(() => chart.data?.length > 2 && document.body.textContent.includes("Analysis range:"),
-                    "trend form did not produce a chart overlay and result table", 90000);
+                    "Apply did not produce a trend chart overlay and result table", 90000);
         check(chart.layout.xaxis.range.every((value, index) => close(value, trendRange[index])), "analysis reset local zoom");
         check(document.querySelector('[data-testid="stDataFrame"]'), "trend result table is missing");
+        await openSettingsGroup("Trend analysis · display (1)");
+        await until(() => Number(document.querySelector('input[aria-label="Redundancy tolerance (%)"]')?.value) === 25
+            && selectedBoundaryRule() === "or",
+            "saved redundancy percentage and boundary rule did not load beside the chart");
+        const displayTitle = [...document.querySelectorAll("h3")]
+            .find(item => item.textContent.includes("Chart display and filters"));
+        check(displayTitle && Boolean(button("Apply").compareDocumentPosition(displayTitle)
+            & Node.DOCUMENT_POSITION_FOLLOWING)
+            && Boolean(displayTitle.compareDocumentPosition(chart) & Node.DOCUMENT_POSITION_FOLLOWING),
+            "display controls are not between calculation Apply and the chart");
         const visibleTraces = () => chart.data.slice(2).filter(trace => trace.x.length);
         await until(() => visibleTraces().length > 1 && visibleTraces().every(trace =>
             trace.x[0] >= trendRange[0] && trace.x.at(-1) <= trendRange[1]),
@@ -184,43 +231,81 @@ STREAMLIT_INTERACTIONS = r"""
             && chart.querySelector(".hoverlayer").textContent.includes("Color λ:"),
             "actual dashboard trend hover lacks metrics or lambda labels");
         Plotly.Fx.unhover(chart);
-        const originalTrends = visibleTraces().slice();
+        const originalTrends = JSON.parse(JSON.stringify(visibleTraces()));
         const ids = traces => traces.map(trace => trace.meta.trend_id).sort().join(",");
-        // React Aria controls require native browser input rather than DOM .click().
-        async function nativeClick(element) {
-            element.scrollIntoView({block: "center"});
-            const box = element.getBoundingClientRect();
-            window.__testClick = {x: box.x + box.width / 2, y: box.y + box.height / 2};
-            await until(() => !window.__testClick, "native click was not delivered");
-        }
-        async function chooseSlope(label) {
-            const control = [...document.querySelectorAll('[data-testid="stSelectbox"]')]
-                .find(item => item.textContent.includes("Slope filter"));
-            check(control, "missing slope filter");
-            await nativeClick(control.querySelector('button[aria-haspopup="listbox"]'));
-            await until(() => [...document.querySelectorAll('[role="option"]')]
-                .some(item => item.textContent.trim() === label), "slope options did not open");
-            await nativeClick([...document.querySelectorAll('[role="option"]')]
-                .find(item => item.textContent.trim() === label));
-        }
-        for (const label of ["Negative slopes", "Positive slopes", "Custom range", "All slopes"]) {
-            const expected = originalTrends.filter(trace => label === "Negative slopes"
+        const lambdaControl = () => [...document.querySelectorAll('[data-testid="stMultiSelect"]')]
+            .find(item => item.textContent.includes("Selected λ values"));
+        check(lambdaControl(), "result-derived lambda multiselect is missing");
+        check(!document.querySelector('textarea[aria-label="Selected λ values"]'),
+              "lambda selection still requires a JSON list");
+        await setCheckbox("Show all λ values", false);
+        await until(() => visibleTraces().length === 0, "lambda filter did not apply without recalculation");
+        await nativeClick(lambdaControl().querySelector('[role="combobox"]'));
+        await until(() => document.querySelector('[role="option"]'), "lambda suggestions did not open");
+        const options = [...document.querySelectorAll('[role="option"]')]
+            .filter(option => option.textContent.trim() !== "Select all");
+        const availableLambdas = options.map(option => Number(option.textContent.trim()));
+        check(availableLambdas.length > 0 && availableLambdas.every(value => Number.isFinite(value) && value > 0),
+              "lambda suggestions are not numeric values from the accepted results");
+        const suggested = options.find(option => originalTrends.some(trace =>
+            trace.meta.lambda_values.includes(Number(option.textContent.trim()))));
+        check(suggested, "lambda suggestions exclude every lambda on the chart");
+        const selectedLambda = Number(suggested.textContent.trim());
+        const matchingLambda = originalTrends.filter(trace => trace.meta.lambda_values.includes(selectedLambda));
+        suggested.click();
+        await until(() => lambdaControl().querySelectorAll('[data-baseweb="tag"]').length === 1,
+                    "choosing a suggested lambda did not select exactly that value");
+        await nativeClick([...document.querySelectorAll("h3")]
+            .find(item => item.textContent.includes("Chart display and filters")));
+        await until(() => ids(visibleTraces()) === ids(matchingLambda),
+                    "selecting a suggested lambda did not filter the chart immediately");
+        check(!document.body.textContent.includes("Unapplied changes"),
+              "lambda display edits changed the calculation draft");
+        check(chart.layout.xaxis.range.every((value, index) => close(value, trendRange[index])),
+              "lambda display filtering reset local zoom");
+        await setCheckbox("Show all λ values", true);
+        await until(() => ids(visibleTraces()) === ids(originalTrends),
+                    "all-lambda display did not restore cached trends immediately");
+        await setCheckbox("Show on chart", false);
+        await until(() => chart.data.length === 2, "hiding a plugin did not remove its overlays immediately");
+        check(document.querySelector('[data-testid="stDataFrame"]'), "hiding overlays removed the result table");
+        check(chart.layout.xaxis.range.every((value, index) => close(value, trendRange[index])),
+              "hiding a plugin reset local zoom");
+        await setCheckbox("Show on chart", true);
+        await until(() => ids(visibleTraces()) === ids(originalTrends),
+                    "showing a plugin did not restore its cached result immediately");
+        for (const label of ["negative", "positive", "range", "all"]) {
+            const expected = originalTrends.filter(trace => label === "negative"
                 ? trace.y.at(-1) < trace.y[0]
-                : label === "Positive slopes" ? trace.y.at(-1) > trace.y[0] : true);
-            await chooseSlope(label);
+                : label === "positive" ? trace.y.at(-1) > trace.y[0] : true);
+            await choose("Slope filter", label);
+            check(document.querySelector('input[aria-label="Minimum slope"]')
+                && document.querySelector('input[aria-label="Maximum slope"]'),
+                "schema-generated slope bounds are missing");
             await until(() => ids(visibleTraces()) === ids(expected)
-                && (label === "Custom range") === Boolean(document.querySelector(
-                    'input[aria-label="Minimum slope (log-price per bar)"]'))
+                && !document.body.textContent.includes("Unapplied changes")
                 && !document.querySelector('[data-test-script-state="running"]'),
-                "slope filter did not update chart: " + label);
-            if (label === "Custom range") {
-                check(document.querySelector('input[aria-label="Minimum slope (log-price per bar)"]'),
-                      "custom slope bounds did not appear");
-            }
+                "slope filter did not update the chart without Apply: " + label);
             check(chart.layout.xaxis.range.every((value, index) => close(value, trendRange[index])),
-                  "slope filter reset local zoom");
+                  "changing a slope filter reset local zoom");
             verify();
         }
+        const lookbackControl = () => document.querySelector('input[aria-label="Maximum lookback per endpoint (bars)"]')
+            ?.closest('[data-testid="stNumberInput"]');
+        await nativeClick(lookbackControl().querySelector('button[data-testid="stNumberInputStepUp"]'));
+        await until(() => document.body.textContent.includes("Unapplied changes"),
+                    "editing calculation settings did not remain a draft");
+        check(ids(visibleTraces()) === ids(originalTrends), "calculation settings changed the chart before Apply");
+        await choose("Slope filter", "negative");
+        await until(() => ids(visibleTraces()) === ids(originalTrends.filter(trace => trace.y.at(-1) < trace.y[0])),
+                    "display filter did not work while calculation changes were pending");
+        check(document.body.textContent.includes("Unapplied changes"),
+              "editing display settings discarded pending calculation changes");
+        await choose("Slope filter", "all");
+        await nativeClick(lookbackControl().querySelector('button[data-testid="stNumberInputStepDown"]'));
+        await until(() => !document.body.textContent.includes("Unapplied changes")
+            && ids(visibleTraces()) === ids(originalTrends),
+            "restoring the calculation draft did not preserve the current display");
         button("All history").click();
         await until(() => close(chart.layout.xaxis.range[0], -0.5)
             && chart.data[0].x.length <= 1000 && visibleTraces().length > 100,
@@ -245,20 +330,54 @@ STREAMLIT_INTERACTIONS = r"""
             && visibleTraces().length > 1, "latest historical trends did not restore");
         await Plotly.relayout(chart, {"xaxis.range": trendRange});
         await until(() => close(chart.layout.xaxis.range[0], trendRange[0]), "local trend zoom did not restore");
-        toggleTrends();
-        await until(() => chart.data?.length === 2, "checkbox did not remove trend overlays");
-        check(chart.layout.xaxis.range.every((value, index) => close(value, trendRange[index])), "checkbox reset local zoom");
-        toggleTrends();
-        await until(() => chart.data?.length > 2, "re-enabled analysis did not reuse its matching result");
+        const originalIds = ids(visibleTraces());
+        button("Remove").click();
+        await until(() => document.body.textContent.includes("Unapplied changes")
+            && !document.querySelector('input[aria-label="Maximum lookback per endpoint (bars)"]'),
+            "Remove did not update the draft selection");
+        check(ids(visibleTraces()) === originalIds, "Remove changed the applied chart before Apply");
+        button("Apply").click();
+        await until(() => chart.data?.length === 2, "Apply did not remove trend overlays");
+        check(chart.layout.xaxis.range.every((value, index) => close(value, trendRange[index])),
+              "removal reset local zoom");
+        button("Add logic").click();
+        await until(() => document.querySelector('input[aria-label="Maximum lookback per endpoint (bars)"]')?.value === "8"
+            && !selectControl("Slope filter")
+            && !document.querySelector('[data-test-script-state="running"]'),
+            "adding another trend instance did not reuse saved defaults without result display controls");
+        check(chart.data.length === 2, "adding an instance calculated it before Apply");
+        button("Apply").click();
+        await until(() => ids(visibleTraces()) === originalIds && chart.data.length > 2,
+                    "re-added trend instance did not restore its matching cached result", 90000);
+        check(chart.layout.xaxis.range.every((value, index) => close(value, trendRange[index])),
+              "re-adding a cached trend instance reset local zoom");
+        await openSettingsGroup("Trend analysis · display (1)");
         check(Number(document.querySelector('input[aria-label="Redundancy tolerance (%)"]')?.value) === 25
-            && selectedBoundaryRule() === "Either boundary (OR)",
-            "re-enabled analysis lost its applied redundancy settings");
-        button("Restore trend defaults").click();
-        await until(() => chart.data?.length === 2
-            && document.querySelector('input[aria-label="Maximum lookback per endpoint (bars)"]')?.value === "2000"
-            && Number(document.querySelector('input[aria-label="Redundancy tolerance (%)"]')?.value) === 5
-            && selectedBoundaryRule() === "Both boundaries (AND)",
-            "restoring defaults did not invalidate the old result and restore form values");
+            && selectedBoundaryRule() === "or", "new trend instance lost its migrated display defaults");
+        verify();
+        await choose("Available chart logic", "Open price bands");
+        button("Add logic").click();
+        await until(() => selectControl("Open reference"), "band calculation settings did not appear");
+        await choose("Open reference", "first_bar");
+        button("Apply").click();
+        const bandTraces = () => chart.data.slice(2).filter(trace => !trace.meta?.trend_overlay);
+        const trendTraces = () => chart.data.slice(2).filter(trace => trace.meta?.trend_overlay && trace.x.length);
+        await until(() => bandTraces().length === 3 && ids(trendTraces()) === originalIds,
+                    "bands and cached trends were not applied together");
+        await openSettingsGroup("Open price bands · display (2)");
+        await setCheckbox("Show on chart", false, displayCard("Open price bands · display (2)"));
+        await until(() => bandTraces().length === 0 && ids(trendTraces()) === originalIds,
+                    "generic band visibility changed other plugins or required Apply");
+        await setCheckbox("Show on chart", true, displayCard("Open price bands · display (2)"));
+        await until(() => bandTraces().length === 3, "showing bands did not restore their cached outputs");
+        await setCheckbox("Show open reference", false, displayCard("Open price bands · display (2)"));
+        await until(() => bandTraces().length === 2 && !bandTraces().some(trace => trace.name === "Open"),
+                    "band display option did not hide its reference line without Apply");
+        check(ids(trendTraces()) === originalIds, "band display settings changed trend outputs");
+        check(chart.layout.xaxis.range.every((value, index) => close(value, trendRange[index])),
+              "combining plugins or changing their display reset local zoom");
+        check(!document.body.textContent.includes("Unapplied changes"),
+              "band display settings were treated as calculation changes");
         verify();
         check(!document.querySelector('[data-testid="stException"]'), "Streamlit raised an application exception");
         result.textContent = "PASS";
@@ -292,13 +411,25 @@ def test_chart_streamlit_window_round_trips(tmp_path):
     from trend_analysis import TrendConfig
 
     settings_path = tmp_path / "trend_config.json"
-    save_trend_settings(TrendConfig(max_history=8, redundancy_percentage=25.0,
-                                   redundancy_boundary_rule="or"), settings_path)
+    saved_settings = TrendConfig(max_history=8, redundancy_percentage=25.0,
+                                 redundancy_boundary_rule="or")
+    save_trend_settings(saved_settings, settings_path)
+    original_settings = settings_path.read_bytes()
+    calls_path = tmp_path / "analysis-calls.txt"
     app.write_text(
         "import streamlit as st\nfrom dashboard.app import _data_page\nfrom research import Research\n"
         "from pathlib import Path\nimport dashboard.trend_settings as settings\nimport dashboard.workspace as workspace\n"
         f"settings.DEFAULT_SETTINGS_PATH = Path({str(settings_path)!r})\n"
         f"workspace.DEFAULT_DIRECTORY = Path({str(tmp_path / 'workspaces')!r})\n"
+        "import chart_logics.plugins.trend as trend_plugin\n"
+        "if not getattr(trend_plugin.analyze, '_browser_counter', False):\n"
+        "    def instrument(original):\n"
+        "        def counted(*args, **kwargs):\n"
+        f"            with Path({str(calls_path)!r}).open('a') as calls: calls.write('analysis\\n')\n"
+        "            return original(*args, **kwargs)\n"
+        "        counted._browser_counter = True\n"
+        "        return counted\n"
+        "    trend_plugin.analyze = instrument(trend_plugin.analyze)\n"
         "st.set_page_config(layout='wide')\n"
         f"_data_page(Research({str(root)!r}, runs_dir={str(tmp_path / 'runs')!r}))\n",
         encoding="utf-8",
@@ -334,8 +465,12 @@ def test_chart_streamlit_window_round_trips(tmp_path):
             assert ready, log.read()
             _run_browser_document(tmp_path, url=f"http://127.0.0.1:{port}",
                                   browser_js=STREAMLIT_INTERACTIONS,
-                                  screenshot_path=tmp_path / "chart-window.png", timeout_seconds=120, native_clicks=True)
-            assert load_trend_settings(settings_path).config == TrendConfig()
+                                  screenshot_path=tmp_path / "chart-window.png", timeout_seconds=240, native_clicks=True)
+            assert load_trend_settings(settings_path).config == saved_settings
+            assert settings_path.read_bytes() == original_settings
+            # Display filters and visibility never recalculate accepted trends.
+            # Navigation, calculation drafts, and a new identical instance reuse results.
+            assert calls_path.read_text().splitlines() == ["analysis"]
         finally:
             process.terminate()
             try:

@@ -171,10 +171,12 @@ def configuration_schema(cls: type) -> dict:
 
 
 def _apply_defaults(value: Any, schema: dict) -> Any:
+    if not isinstance(schema, dict):
+        return deepcopy(value)
     if isinstance(value, dict):
         value = deepcopy(value)
         for name, property_schema in schema.get("properties", {}).items():
-            if name not in value and "default" in property_schema:
+            if name not in value and isinstance(property_schema, dict) and "default" in property_schema:
                 value[name] = deepcopy(property_schema["default"])
             if name in value:
                 value[name] = _apply_defaults(value[name], property_schema)

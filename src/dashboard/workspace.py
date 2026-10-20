@@ -69,6 +69,7 @@ class MarketMemory:
         directory = Path(directory) if directory is not None else DEFAULT_DIRECTORY
         self.path = directory / (sha256(scope.encode()).hexdigest() + ".json")
         self.analysis_path = self.path.with_suffix(".analysis.json.gz")
+        self.chart_analysis_path = self.path.with_suffix(".chart-analysis.json.gz")
         self.values = {"widgets": {}}
         self.warning = None
         self.blocked = False
@@ -180,6 +181,27 @@ class MarketMemory:
         except (OSError, EOFError, UnicodeError, ValueError, TypeError, KeyError, AttributeError, zlib.error, PolarsError):
             self.values["analysis_key"] = None
             st.warning("Saved trend analysis could not be restored. Apply and analyze to rebuild it.")
+            return None
+
+
+    def save_chart_analysis(self, snapshot):
+        """Store a versioned, declarative result snapshot for all chart logics."""
+        if self.blocked:
+            raise ValueError("The saved workspace is unreadable and was left unchanged.")
+        content = json.dumps(snapshot, allow_nan=False).encode()
+        _atomic_write(self.chart_analysis_path, gzip.compress(content))
+
+    def load_chart_analysis(self):
+        """The runner verifies source/config/version identities before reuse."""
+        try:
+            snapshot = json.loads(gzip.decompress(self.chart_analysis_path.read_bytes()))
+            if not isinstance(snapshot, dict) or snapshot.get("version") not in (1, 2):
+                raise ValueError("Invalid chart analysis snapshot.")
+            return snapshot
+        except FileNotFoundError:
+            return None
+        except (OSError, EOFError, UnicodeError, ValueError, TypeError, zlib.error):
+            st.warning("Saved chart results could not be restored. Apply to rebuild them.")
             return None
 
 

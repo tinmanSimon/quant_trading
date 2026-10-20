@@ -11,6 +11,7 @@ from plotly.offline import get_plotlyjs
 import streamlit as st
 
 from .charts import CHART_CONFIG, window_price_chart
+from .chart_overlays import window_overlays
 from .trend_overlays import trend_descriptors
 
 
@@ -62,7 +63,7 @@ def viewport_request(value, chart_id):
 
 
 def window_payload(series, *, chart_id, timeframe, timezone, title="", request=None,
-                   trends=(), overlay_revision=0):
+                   trends=(), overlays=(), overlay_revision=0):
     request = viewport_request(request, chart_id)
     window = series.window(request["start"] if request else None, request["end"] if request else None,
                            width=request["width"] if request else 900)
@@ -83,12 +84,16 @@ def window_payload(series, *, chart_id, timeframe, timezone, title="", request=N
     gaps = [(position, len(markers[position]), markers[position][:5]
              + (["More timestamps in omission details"] if len(markers[position]) > 5 else []))
             for position in positions]
-    overlays = trend_descriptors(trends)
+    trend_layers = trend_descriptors(trends)
+    primitives = [{"type": "log_line", "id": f"legacy-trend:{index}:{item['trend_id']}", **item}
+                  for index, item in enumerate(trend_layers)] + list(overlays)
+    bounded_overlays = window_overlays(primitives, window.loaded_range)
     figure = window_price_chart(window, timeframe=timeframe, timezone=timezone, title=title,
-                                gap_markers=gaps, trend_overlays=overlays)
+                                gap_markers=gaps, overlays=bounded_overlays)
     overview = series.window(-0.5, series.total_count - 0.5, width=300)
     return {"figure": json.loads(figure.to_json()), "config": CHART_CONFIG, "chart_id": chart_id,
-            "trend_overlays": overlays, "overlay_revision": overlay_revision,
+            "trend_overlays": trend_layers, "overlays": bounded_overlays,
+            "overlay_coverage": window.loaded_range, "overlay_revision": overlay_revision,
             "request_id": request["request_id"] if request else 0, "total_count": series.total_count,
             "width_budget": max(200, min(1000, int(request["width"] if request else 900))),
             "view_range": window.view_range, "loaded_range": window.loaded_range,
@@ -102,12 +107,14 @@ def window_payload(series, *, chart_id, timeframe, timezone, title="", request=N
                          "last_label": series.timestamps[-1].isoformat()}}
 
 
-def render_series_chart(series, *, chart_id, timeframe, timezone, title="", trends=(), overlay_revision=0):
+def render_series_chart(series, *, chart_id, timeframe, timezone, title="", trends=(), overlays=(),
+                        overlay_revision=0):
     key = "market-price-chart-" + chart_id
     state = st.session_state.get(key, {})
     request = state.get("viewport") if isinstance(state, dict) else getattr(state, "viewport", None)
     payload = window_payload(series, chart_id=chart_id, timeframe=timeframe, timezone=timezone,
-                             title=title, request=request, trends=trends, overlay_revision=overlay_revision)
+                             title=title, request=request, trends=trends, overlays=overlays,
+                             overlay_revision=overlay_revision)
     component = _renderer()
     component(data=payload, key=key, height=820, width="stretch", default={"viewport": None},
               on_viewport_change=lambda: None)

@@ -35,7 +35,12 @@ export default function render({parentElement, data, setStateValue}) {
     let wanted = range.slice();
     let latestRequested = data.request_id || 0, applied = latestRequested;
     let overlayRevision = data.overlay_revision || 0;
-    let overlays = data.trend_overlays || [];
+    function readOverlays(value) {
+        return value.overlays || (value.trend_overlays || []).map((trend, index) => ({
+            ...trend, type: "log_line", id: `legacy-trend:${index}:${trend.trend_id}`}));
+    }
+    let overlays = readOverlays(data);
+    let overlayCoverage = data.overlay_coverage || data.loaded_range;
     let sampledOverlayView = "";
     let resolutionBudget = data.width_budget || Math.max(200, Math.min(1000, chart.clientWidth || 900));
     let sentBudget = resolutionBudget, observedWidth = chart.clientWidth;
@@ -55,28 +60,90 @@ export default function render({parentElement, data, setStateValue}) {
         return Math.exp(trend.intercept + trend.slope * (position - trend.start_index));
     }
 
-    function withOverlays(base) {
-        // Overlay changes need not carry the currently displayed server window.
-        // Always sample descriptors against the window we actually accepted.
-        const traces = base.figure.data.filter(trace => !trace.meta?.trend_overlay);
-        for (const trend of overlays) {
-            const first = Math.max(trend.start_index, base.loaded_range[0]);
-            const last = Math.min(trend.end_index, base.loaded_range[1]);
-            if (last < first) continue;
+    function boundIndex(values, target, right = false) {
+        let first = 0, end = values.length;
+        while (first < end) {
+            const middle = (first + end) >>> 1;
+            if (values[middle] < target || (right && values[middle] === target)) first = middle + 1;
+            else end = middle;
+        }
+        return first;
+    }
+
+    function clippedPoints(descriptor, limits, keys) {
+        const positions = descriptor.x, x = [], values = keys.map(() => []);
+        const first = boundIndex(positions, limits[0]), end = boundIndex(positions, limits[1], true);
+        function edge(left, right, position) {
+            if (left < 0 || right >= positions.length || positions[left] === positions[right]) return;
+            x.push(position);
+            keys.forEach((key, index) => {
+                const a = descriptor[key][left], b = descriptor[key][right];
+                values[index].push(a == null || b == null ? null
+                    : a + (b - a) * (position - positions[left]) / (positions[right] - positions[left]));
+            });
+        }
+        if (first < positions.length && positions[first] > limits[0]) edge(first - 1, first, limits[0]);
+        for (let index = first; index < end; index++) {
+            x.push(positions[index]);
+            keys.forEach((key, item) => values[item].push(descriptor[key][index]));
+        }
+        if (end && positions[end - 1] < limits[1]) edge(end - 1, end, limits[1]);
+        return {x, values};
+    }
+
+    function primitiveTraces(descriptor, limits) {
+        const kind = descriptor.type;
+        const meta = {chart_overlay: true, overlay_id: descriptor.id, primitive: kind};
+        if (descriptor.trend_id) Object.assign(meta, {
+            trend_overlay: true, trend_id: descriptor.trend_id,
+            lambda_values: descriptor.lambda_values, lambda_levels: descriptor.lambda_levels,
+            primary_lambda: descriptor.primary_lambda, origin: descriptor.origin});
+        const common = {type: "scatter", mode: "lines", name: descriptor.name || descriptor.id,
+            line: descriptor.line, hovertemplate: descriptor.hovertemplate, xaxis: "x", yaxis: "y",
+            showlegend: false, connectgaps: false, meta};
+        if (kind === "log_line") {
+            const first = Math.max(descriptor.start_index, limits[0]);
+            const last = Math.min(descriptor.end_index, limits[1]);
+            if (last < first) return [];
             const size = Math.min(768, Math.max(2, Math.ceil(last - first) + 1));
             const x = Array.from({length: size}, (_, index) => first + (last - first) * index / (size - 1));
-            traces.push({type: "scatter", mode: "lines", x, y: x.map(value => trendPrice(trend, value)),
-                name: trend.name || trend.trend_id, line: trend.line, hovertemplate: trend.hovertemplate,
-                xaxis: "x", yaxis: "y", showlegend: false,
-                meta: {trend_overlay: true, trend_id: trend.trend_id,
-                    lambda_values: trend.lambda_values, lambda_levels: trend.lambda_levels,
-                    primary_lambda: trend.primary_lambda, origin: trend.origin}});
+            return [{...common, x, y: x.map(value => trendPrice(descriptor, value))}];
         }
+        if (kind === "markers") {
+            const first = boundIndex(descriptor.x, limits[0]), end = boundIndex(descriptor.x, limits[1], true);
+            return first === end ? [] : [{...common, mode: "markers", marker: descriptor.marker,
+                x: descriptor.x.slice(first, end), y: descriptor.y.slice(first, end)}];
+        }
+        const keys = kind === "band" ? ["lower", "upper"] : ["y"];
+        const {x, values} = clippedPoints(descriptor, limits, keys);
+        if (!x.length || !values[0].some(value => value != null)) return [];
+        if (kind === "band") return [
+            {...common, x, y: values[0]},
+            {...common, x, y: values[1], fill: "tonexty", fillcolor: descriptor.fillcolor || "rgba(96,165,250,0.14)",
+                meta: {...meta, band_upper: true}}];
+        return [{...common, x, y: values[0]}];
+    }
+
+    function missingOverlayWindow(target) {
+        if (!overlayCoverage) return false;
+        return overlays.some(descriptor => {
+            if (descriptor.type === "log_line" || !descriptor.source_range) return false;
+            const first = Math.max(target[0], descriptor.source_range[0]);
+            const last = Math.min(target[1], descriptor.source_range[1]);
+            return first <= last && (first < overlayCoverage[0] || last > overlayCoverage[1]);
+        });
+    }
+
+    function withOverlays(base) {
+        // Calculation revisions and viewport replies arrive independently.
+        // Rebuild against the window actually accepted without restoring old bars.
+        const traces = base.figure.data.filter(trace => !trace.meta?.chart_overlay && !trace.meta?.trend_overlay);
+        for (const descriptor of overlays) traces.push(...primitiveTraces(descriptor, base.loaded_range));
         const layout = {...base.figure.layout,
             xaxis: {...base.figure.layout.xaxis, range: range.slice(), autorange: false},
             xaxis2: {...base.figure.layout.xaxis2, range: range.slice(), autorange: false}};
         if (initialized && chart.layout) layout.dragmode = chart.layout.dragmode;
-        return {...base, overlay_revision: overlayRevision, trend_overlays: overlays,
+        return {...base, overlay_revision: overlayRevision, overlays, overlay_coverage: overlayCoverage,
             figure: {...base.figure, data: traces, layout}};
     }
 
@@ -84,23 +151,21 @@ export default function render({parentElement, data, setStateValue}) {
         const signature = [range[0], range[1], chart.clientWidth, overlayRevision, applied].join("/");
         if (signature === sampledOverlayView) return;
         sampledOverlayView = signature;
-        const descriptors = new Map(overlays.map(trend => [trend.trend_id, trend]));
+        const descriptors = new Map(overlays.map(descriptor => [descriptor.id, descriptor]));
         const indices = [], xs = [], ys = [];
         payload.figure.data.forEach((trace, index) => {
-            if (!trace.meta?.trend_overlay) return;
-            const trend = descriptors.get(trace.meta.trend_id);
-            if (!trend) return;
-            const first = Math.max(trend.start_index, range[0]);
-            const last = Math.min(trend.end_index, range[1]);
-            // Plotly line hover uses nearby sampled points. Adapt the samples
-            // to the visible pixels so deep zoom still permits hovering along
-            // the curve. This evaluates the same fit; it never reruns analysis.
+            if (trace.meta?.primitive !== "log_line") return;
+            const descriptor = descriptors.get(trace.meta.overlay_id);
+            if (!descriptor) return;
+            const first = Math.max(descriptor.start_index, range[0]);
+            const last = Math.min(descriptor.end_index, range[1]);
+            // Hover samples evaluate the same analytic fit; no analysis runs.
             const width = chart.clientWidth * Math.max(0, last - first) / (range[1] - range[0]);
             const size = Math.min(768, Math.max(2, Math.ceil(width / 6) + 1));
             const x = last < first ? [] : Array.from({length: size}, (_, item) => first + (last - first) * item / (size - 1));
             indices.push(index);
             xs.push(x);
-            ys.push(x.map(position => trendPrice(trend, position)));
+            ys.push(x.map(position => trendPrice(descriptor, position)));
         });
         if (indices.length) await window.Plotly.restyle(chart, {x: xs, y: ys}, indices);
     }
@@ -112,6 +177,7 @@ export default function render({parentElement, data, setStateValue}) {
             + (payload.omission_marker_note ? " · " + payload.omission_marker_note : "");
         startControl.value = String(wanted[0] + 0.5);
         endControl.value = String(wanted[1] + 0.5);
+        if (overlays.some(item => item.sampled)) status.textContent += " · Overlay display samples; zoom for detail";
         const overview = payload.overview;
         const width = Math.max(1, chart.clientWidth), height = 55;
         const scale = window.devicePixelRatio || 1;
@@ -184,13 +250,18 @@ export default function render({parentElement, data, setStateValue}) {
 
     function needsWindow(target) {
         if (!dynamic) return false;
+        if (missingOverlayWindow(target)) return true;
         if (target[0] < payload.loaded_range[0] || target[1] > payload.loaded_range[1]) return true;
         const span = target[1] - target[0];
         const originalVisible = Math.min(count, Math.ceil(target[1] + 0.5) - Math.floor(target[0] + 0.5));
         const budget = Math.max(200, Math.min(1000, chart.clientWidth || 900));
+        const previousSpan = payload.view_range[1] - payload.view_range[0];
+        // Dense plugin paths can contain multiple points per source bar.
+        // Refine after a meaningful zoom, without requesting the same original
+        // candle window forever merely because its overlays remain sampled.
+        if (overlays.some(descriptor => descriptor.sampled) && span < previousSpan * 0.65) return true;
         const grouped = payload.source_counts.some(value => value > 1);
         if (!grouped) return originalVisible > budget;
-        const previousSpan = payload.view_range[1] - payload.view_range[0];
         return originalVisible <= budget || span < previousSpan * 0.65 || span > previousSpan * 1.6
             || budget < resolutionBudget * 0.7 || budget > resolutionBudget * 1.5;
     }
@@ -245,18 +316,23 @@ export default function render({parentElement, data, setStateValue}) {
             high = Math.max(high, candles.high[index]);
             volume = Math.max(volume, volumes[index]);
         }
-        for (const trend of overlays) {
-            const first = Math.max(trend.start_index, range[0]);
-            const last = Math.min(trend.end_index, range[1]);
-            if (last < first) continue;
-            // A log-linear fit is monotone. Evaluate exact clipped endpoints,
-            // including fractional viewport edges between rendered samples.
-            for (const position of [first, last]) {
-                const value = trendPrice(trend, position);
-                if (Number.isFinite(value)) {
-                    low = Math.min(low, value);
-                    high = Math.max(high, value);
-                }
+        for (const descriptor of overlays) {
+            let values;
+            if (descriptor.type === "log_line") {
+                const first = Math.max(descriptor.start_index, range[0]);
+                const last = Math.min(descriptor.end_index, range[1]);
+                if (last < first) continue;
+                // Analytic fits are monotone; endpoints include fractional edges.
+                values = [trendPrice(descriptor, first), trendPrice(descriptor, last)];
+            } else if (descriptor.type === "markers") {
+                values = descriptor.y.slice(boundIndex(descriptor.x, range[0]), boundIndex(descriptor.x, range[1], true));
+            } else {
+                const keys = descriptor.type === "band" ? ["lower", "upper"] : ["y"];
+                values = clippedPoints(descriptor, range, keys).values.flat();
+            }
+            for (const value of values) if (Number.isFinite(value)) {
+                low = Math.min(low, value);
+                high = Math.max(high, value);
             }
         }
         const tickCount = Math.max(2, Math.min(12, Math.floor(chart.clientWidth / 140)));
@@ -333,9 +409,10 @@ export default function render({parentElement, data, setStateValue}) {
             const newWindow = next.request_id >= latestRequested && next.request_id > applied;
             const newOverlays = (next.overlay_revision || 0) > overlayRevision;
             if (!newWindow && !newOverlays) return;
-            if (newOverlays) {
-                overlayRevision = next.overlay_revision;
-                overlays = next.trend_overlays || [];
+            if (newOverlays || (newWindow && (next.overlay_revision || 0) === overlayRevision)) {
+                overlayRevision = next.overlay_revision || 0;
+                overlays = readOverlays(next);
+                overlayCoverage = next.overlay_coverage || next.loaded_range;
             }
             if (newWindow) {
                 payload = next;
@@ -355,7 +432,8 @@ export default function render({parentElement, data, setStateValue}) {
                 {...payload.config, responsive: false, doubleClick: "reset"});
             await fit();
             // The layout may have changed while this request was in flight.
-            if (!disposed && newWindow && needsWindow(wanted)) navigate(wanted);
+            if (!disposed && ((newWindow && needsWindow(wanted))
+                    || (!pending && missingOverlayWindow(wanted)))) navigate(wanted);
         }).catch(showError);
     }
 

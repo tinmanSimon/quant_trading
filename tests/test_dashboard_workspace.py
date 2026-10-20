@@ -54,7 +54,8 @@ def test_workspace_save_failure_keeps_session_values(tmp_path, monkeypatch):
 
 @pytest.fixture
 def market(tmp_path, monkeypatch):
-    from dashboard import app as dashboard, trends, trend_settings
+    from dashboard import app as dashboard, trend_settings
+    from chart_logics.plugins import trend as trends
     research = Research(tmp_path / "data", tmp_path / "runs")
     for symbol, timeframe, count in (("AAA", "1d", 30), ("TEST", "1d", 30), ("TEST", "1h", 800)):
         delta = timedelta(hours=1) if timeframe == "1h" else timedelta(days=1)
@@ -84,8 +85,17 @@ def _table(app):
 
 
 def _apply(app):
-    next(button for button in app.button if button.label == "Apply and analyze").click().run()
+    app.button(key="chart-logic-apply").click().run()
     assert not app.exception and not app.error
+
+
+def _add_trend(app):
+    from chart_logics.plugins.trend import TrendLogic
+    app.selectbox(key="chart-logic-add-choice").set_value(("trend", TrendLogic.version)).run()
+    app.button(key="chart-logic-add").click().run()
+    instance_id = next(button.key.removeprefix("chart-logic-remove-")
+                       for button in app.button if button.key.startswith("chart-logic-remove-"))
+    return "chart-logic-" + instance_id + "-"
 
 
 def test_market_navigation_and_new_session_restore_exact_workspace(market, monkeypatch):
@@ -99,23 +109,24 @@ def test_market_navigation_and_new_session_restore_exact_workspace(market, monke
     app.date_input[0].set_value(date(2024, 1, 2))
     app.date_input[1].set_value(date(2024, 1, 30)).run()
     app.selectbox(key="browse-timezone").set_value("Asia/Shanghai").run()
-    app.checkbox(key="analyze-trends").check().run()
-    app.number_input(key="_trend_setting_max_history").set_value(16)
-    app.number_input(key="_trend_setting_penalty_grid_levels").set_value(4)
+    prefix = _add_trend(app)
+    app.number_input(key=prefix + "max_history").set_value(16)
+    app.number_input(key=prefix + "penalty_grid_levels").set_value(4)
     _apply(app)
-    app.checkbox(key="show-redundant-trends").check().run()
-    app.checkbox(key="show-all-trend-lambdas").uncheck().run()
-    app.multiselect(key="selected-trend-lambdas").set_value([1.]).run()
-    app.selectbox(key="selected-trend-slope-mode").set_value("range").run()
-    app.number_input(key="_trend-slope-minimum").set_value(0.)
-    app.number_input(key="_trend-slope-maximum").set_value(.01).run()
+    display = prefix.replace("chart-logic-", "chart-display-")
+    app.checkbox(key=display + "show_redundant").check()
+    app.checkbox(key=display + "show_all_lambdas").uncheck()
+    app.multiselect(key=display + "selected_lambdas").set_value([1.0])
+    app.selectbox(key=display + "slope_mode").set_value("range")
+    app.number_input(key=display + "slope_min").set_value(0.)
+    app.number_input(key=display + "slope_max").set_value(.01).run()
     app.checkbox(key="browse-show-original-bars").check().run()
     next(item for item in app.number_input if item.label == "Original bar page").set_value(1).run()
     expected = _table(app)
     assert expected["on_chart"].any()
     assert len(calls) == 1
     # Draft edits are saved immediately but do not change the applied result.
-    app.number_input(key="_trend_setting_max_history").set_value(24).run()
+    app.number_input(key=prefix + "max_history").set_value(24).run()
     assert len(calls) == 1
     app.sidebar.radio[0].set_value("Saved runs").run()
     app.run()  # Allow Streamlit to clean up every absent widget.
@@ -131,14 +142,15 @@ def test_market_navigation_and_new_session_restore_exact_workspace(market, monke
         assert restored.radio(key="browse-read").value == "One exact revision"
         assert [item.value for item in restored.date_input] == [date(2024, 1, 2), date(2024, 1, 30)]
         assert restored.selectbox(key="browse-timezone").value == "Asia/Shanghai"
-        assert restored.checkbox(key="analyze-trends").value
-        assert restored.number_input(key="_trend_setting_max_history").value == 24
-        assert restored.session_state["_trend_controls_state"]["applied"].max_history == 16
-        assert restored.checkbox(key="show-redundant-trends").value
-        assert restored.multiselect(key="selected-trend-lambdas").value == [1.]
-        assert restored.selectbox(key="selected-trend-slope-mode").value == "range"
-        assert restored.number_input(key="_trend-slope-minimum").value == 0.
-        assert restored.number_input(key="_trend-slope-maximum").value == .01
+        assert restored.number_input(key=prefix + "max_history").value == 24
+        saved = MarketMemory(str(research.pipeline.store.data_dir.resolve())).values["chart_logics"]
+        assert saved["applied"][0]["config"]["max_history"] == 16
+        assert saved["draft"][0]["config"]["max_history"] == 24
+        assert restored.checkbox(key=display + "show_redundant").value
+        assert restored.multiselect(key=display + "selected_lambdas").value == [1.0]
+        assert restored.selectbox(key=display + "slope_mode").value == "range"
+        assert restored.number_input(key=display + "slope_min").value == 0.
+        assert restored.number_input(key=display + "slope_max").value == .01
         assert next(item for item in restored.number_input if item.label == "Original bar page").value == 1
         assert _table(restored).equals(expected)
         assert len(calls) == 1
@@ -159,7 +171,7 @@ def test_market_navigation_and_new_session_restore_exact_workspace(market, monke
     fresh.date_input[0].set_value(date(2024, 1, 3)).run()
     assert not fresh.exception and not fresh.error
     assert not any("trend_id" in table.value.columns for table in fresh.dataframe)
-    assert any("Apply and analyze" in item.value for item in fresh.info)
+    assert any("Click Apply" in item.value for item in fresh.info)
     assert len(calls) == 1
 
 
@@ -168,15 +180,15 @@ def test_missing_selection_falls_back_and_corrupt_analysis_requires_apply(market
     app = AppTest.from_string(script).run()
     app.selectbox(key="browse-symbol").set_value("TEST").run()
     app.selectbox(key="browse-series").set_value(("yahoo", "1h", "")).run()
-    app.checkbox(key="analyze-trends").check().run()
-    app.number_input(key="_trend_setting_max_history").set_value(8)
+    prefix = _add_trend(app)
+    app.number_input(key=prefix + "max_history").set_value(8)
     _apply(app)
     memory = MarketMemory(str(research.pipeline.store.data_dir.resolve()))
-    assert memory.values["analysis_key"]
-    memory.analysis_path.write_bytes(b"corrupted snapshot")
+    assert memory.values["chart_logics"]["applied"]
+    memory.chart_analysis_path.write_bytes(b"corrupted snapshot")
     fresh = AppTest.from_string(script).run()
     assert not fresh.exception and not fresh.error
-    assert any("Saved trend analysis" in warning.value for warning in fresh.warning)
+    assert any("Saved chart results" in warning.value for warning in fresh.warning)
     assert not any("trend_id" in table.value.columns for table in fresh.dataframe)
     assert len(calls) == 1
     original_list = research.pipeline.list_datasets

@@ -184,17 +184,20 @@ a distinct price-basis label in saved results.
 ### Saved Market data workspace
 
 Market data automatically remembers its provider, ticker search and selection,
-series/timeframe, revision, date window, timezone, analysis toggle, λ and slope
-filters, original-bar page, and expanded sections. Returning from another page
-or reopening the dashboard restores those controls. Trend parameter edits are
-saved when committed in their inputs, even before **Apply and analyze**; the
-chart and results continue to use the last applied parameters.
+series/timeframe, revision, date window, timezone, selected chart logic instances,
+logic settings, original-bar page, and expanded sections. Returning from another page
+or reopening the dashboard restores those controls. Calculation parameter edits are
+saved when committed in their inputs, even before **Apply**; results continue
+to use the last applied calculation settings. Removals also remain pending
+until Apply. Display settings are saved separately per instance and update
+the existing chart immediately, including while calculation edits are pending.
 
 Each data directory has a separate workspace in `.local/market_workspaces/`.
-The latest successful analysis is saved as compressed JSON and restored without
+The latest applied result bundle is saved as compressed JSON and restored without
 recomputation only when the source contents, selection, applied parameters, and
-algorithm version still match. Changed data requires **Apply and analyze**.
-Unavailable saved selections fall back to available options. Sidebar data and
+logic versions still match. Changed data requires **Apply**. Missing logic modules
+retain their saved configurations with a warning; remove or restore them before
+applying. Unavailable dataset selections fall back to available options. Sidebar data and
 runs directories are remembered too. These project-local files are ignored by Git.
 
 Chart zoom, pan, and drag mode are remembered in the same browser for the most
@@ -202,10 +205,166 @@ recent 32 chart identities. Reopening the same data at the same dashboard addres
 restores that view; a changed dataset starts a fresh view. Browser storage must
 be available for chart-view persistence.
 
+### Dynamic chart logic
+
+The **Chart logic** panel supports any number of independent analysis instances.
+Choose a logic, click **Add logic**, configure it, and click the shared **Apply**
+button. Add the same logic again to compare parameter sets. **Remove** changes
+only the draft; Apply removes its output. Apply with no selected logic clears all
+analysis overlays. Original candles, volume, and navigation remain available.
+
+Apply validates all configurations before calculating. Calculations use original
+selected bars, never grouped display candles or the zoom window. Each logic is
+cached independently by its version, settings, and verified source contents.
+Successful results remain available if another calculation fails; the failed
+logic's old output is cleared and its error is shown. Chart navigation changes
+only bounded display samples. Results include each instance's applied settings.
+
+After Apply, **Chart display and filters** appears directly above the chart.
+Every logic has a **Show on chart** toggle; plugins can provide their own display
+settings in the same panel. Display changes never call `calculate`, alter the
+complete saved result, or enter its cache key. Hiding, filtering, or showing a
+result again takes effect immediately and preserves zoom. Invalid display
+settings show an error and retain the last valid display. Calculation drafts
+remain independent and still require Apply.
+
+Trend's λ control is a searchable multiselect populated from the actual accepted
+results, not a JSON editor or a guessed grid. Options stay available when other
+filters hide the matching lines. **Show all λ values** bypasses the selection;
+turn it off to select individual suggestions. An empty selection deliberately
+hides λ-derived lines and produces an explanatory message. Redundancy and slope
+filters are also display settings. Open-price bands have separate upper, lower,
+and opening-reference visibility toggles.
+
+Saved configurations from the earlier combined-settings interface are split
+into calculation and display settings automatically. Older result snapshots
+may contain only filtered overlays, so they require one Apply to rebuild the
+complete archive. Subsequent display changes and restored complete results do
+not rerun analysis.
+
+**Open price bands** defaults to 5% above and below the session open. Its reference
+can instead be the first selected bar's open or each bar's own open. For intraday
+session mode, regular hours follow the XNYS exchange calendar, including holidays,
+DST and early closes. Extended hours use the explicit US-equity convention of
+04:00–20:00 New York time (17:00 close on early-close days). The display timezone
+never changes the reference. A session needs its actual opening bar in the
+selected data; missing opens are reported and skipped, never replaced with the
+first visible bar. Expand the selected date range if needed. Daily bars use the
+provider's daily open; extended-hours opens cannot be inferred from daily bars.
+Weekly/monthly bars support first-bar and each-bar references. Session outputs
+do not connect overnight.
+
+### Adding a chart logic module
+
+Create one Python file under `src/chart_logics/plugins/`. A concrete
+`BaseChartLogic` subclass is automatically discovered, including subpackages.
+No registry entry, package export, dashboard branch, or renderer edit is needed.
+New modules appear on the next dashboard rerun; restart after editing an already
+imported module. Discovery imports trusted local Python code. Broken imports and
+duplicate name/version pairs are reported without hiding unrelated logics.
+
+For example, save this as `src/chart_logics/plugins/close_offset.py`:
+
+```python
+from chart_logics import BaseChartLogic, LogicResult
+
+
+class CloseOffset(BaseChartLogic):
+    name = "close_offset"
+    version = "1"
+    label = "Close offset"
+    description = "A percentage offset from each original closing price."
+    required_columns = ("timestamp", "close")
+    config_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "percent": {"type": "number", "default": 5.0,
+                        "title": "Offset (%)", "minimum": -100},
+        },
+    }
+
+    def calculate(self, context, config, progress=None):
+        prices = context.frame["close"].to_list()
+        return LogicResult(overlays=[{
+            "type": "line", "id": "offset", "name": "Close offset",
+            "x": list(range(len(prices))),
+            "y": [price * (1 + config["percent"] / 100) for price in prices],
+            "line": {"color": "#2563eb", "width": 2},
+        }])
+```
+
+The JSON Schema generates the controls and validates settings. Common numbers,
+booleans, choices, strings, optional fields and nested objects use normal inputs;
+arrays and maps use JSON editors. Optional schema `x-ui-groups` entries
+(`title`, `fields`, `expanded`) organize settings into collapsible sections;
+unlisted fields remain available. Override `validate(config)` for constraints
+between fields. `supported_timeframes` can restrict inputs. `calculate` receives
+`LogicContext` with original `frame`, `timeframe`, source `identity`, `cutoff`,
+session timezone and optional supporting data. Use `context.completed_frame`
+and `input_policy = "completed"` for closed-bar analyses. Set `uses_cutoff = True`
+only if the calculation depends on exact cutoff time beyond bar completion.
+
+Calculation and display settings have separate contracts. `config_schema`
+defines settings passed to `calculate`; `display_schema` defines the live
+chart controls. Their top-level field names must be distinct. Override `display_schema_for(result)` to populate choices from
+the complete result. For suggested array selections, provide `items.enum` for
+nonempty choices or `x-ui-options` for a list that may be empty; the dashboard
+renders a searchable multiselect. `validate_display(config, result)` handles
+cross-field constraints, and `present(result, config)` returns the filtered or
+styled view. The framework supplies a defensive copy of the calculated result;
+`present` must not call `calculate`, read new source data, or rerun analysis.
+No central registry or dashboard branch is needed for these controls.
+
+For example, add a display-only color selector and presentation method inside
+your logic class:
+
+```python
+display_schema = {
+    "type": "object", "additionalProperties": False,
+    "properties": {"color": {"type": "string", "default": "blue",
+                             "enum": ["blue", "green", "orange"]}},
+}
+
+def present(self, result, config):
+    for overlay in result.overlays:
+        overlay.setdefault("line", {})["color"] = config["color"]
+    return result
+```
+
+Return the **complete, unfiltered** calculation as a `LogicResult` with
+JSON-compatible `overlays`, optional `tables`
+(`{"name": "Results", "rows": [{...}]}`), `messages` (strings), and optional
+`data` (a JSON object containing any additional archive needed by `present`).
+Supported overlay primitives are:
+
+| Type | Coordinates | Purpose |
+| --- | --- | --- |
+| `line` | ordered `x`, matching `y` | Curves or horizontal segments |
+| `markers` | ordered `x`, matching `y` | Events or isolated levels |
+| `band` | ordered `x`, `lower`, `upper` | Shaded envelopes |
+| `log_line` | `start_index`, `end_index`, `slope`, `intercept` | Exact exponential fitted curves |
+
+Coordinates refer to original selected bar indices, starting at zero. Each
+primitive requires a locally unique `id`; the framework namespaces IDs by logic
+instance. Optional `name`, `line`, `marker`, `fillcolor`, and `hovertemplate`
+control appearance. Styles use scalar values per primitive, not per-point arrays.
+Use null `y` values to disconnect line segments (both band
+boundaries must share nulls). The renderer clips and bounds array samples for
+transport without changing cached calculations. Keep descriptor counts bounded
+by combining related series with gaps rather than creating one trace per bar.
+`log_line` evaluates `exp(intercept + slope * (x - start_index))`.
+
+Bump `version` whenever calculation or parameter semantics change, and
+`result_version` when the saved archive representation changes. All saved
+results are declarative JSON, not pickled Python objects. New kinds of plots or
+new input-source capabilities require a framework extension; new calculations
+using this contract require only their module.
+
 ### Causal historical trend analysis
 
-On **Market data**, enable **Analyze trends**, adjust the prefilled settings if
-needed, then choose **Apply and analyze**. This describes the original close
+On **Market data**, choose **Trend analysis** under **Chart logic**, click
+**Add logic**, adjust its settings, then click **Apply**. This describes the original close
 prices in the selected ticker/provider/revision/date range; it does not forecast
 returns. The chart's zoom and pan only change the view. They never refit a trend
 or analyze display-grouped candles. Every eligible endpoint in the selected
@@ -223,9 +382,8 @@ resolution (bars)** defaults to **5** and is saved with the other settings;
 set it to **0** to use only the percentage. The minimum applies to both rules.
 Length counts source bars including both endpoints. Boundary distances
 are compared inclusively against that resolution without rounding. **Boundary
-matching rule** offers **Both boundaries (AND)** (the default), which requires
-both start and end differences to be within the resolution, or **Either boundary
-(OR)**, which requires only one. OR can suppress different trend scales that
+matching rule** offers **and** (the default), which requires
+both start and end differences to be within the resolution, or **or**, which requires only one. OR can suppress different trend scales that
 share a start or end, even at 0%. With both the percentage and minimum set to
 zero, AND only matches identical boundaries and OR matches either exact boundary.
 
@@ -238,27 +396,28 @@ analysis. The table retains every accepted
 interval with **On chart** or **Redundant** status and a reference to its
 representative. Rejected candidates are **Uncertain** in the diagnostics table,
 with the reason they failed acceptance.
-After analysis, **Show redundant intervals** adds the redundant intervals to the
-chart immediately without recomputing the analysis. It is off by default. The
+Enable **Show redundant trends** in **Chart display and filters** to include
+redundant intervals immediately, without rerunning analysis. It is off by default. The
 table keeps their **Redundant** classification and representative reference,
 while **On chart** reflects their current visibility. Uncertain candidates are
 not plotted by this option.
 **Show all λ values** is enabled by default. Turn it off and choose one or more
-**λ values** to show only intervals discovered at any selected penalty. An empty
-selection hides all trend lines; tail-derived intervals can be selected separately
-as **No segmentation λ (tail-derived)**. The filter applies after redundancy
-selection and never reruns analysis or changes line colors. All results remain
+**Selected λ values** from the searchable suggestions to show only intervals
+discovered at any selected penalty immediately. An empty selection hides λ-derived lines; enable
+**Include trends without λ** to include tail-derived intervals. Filtering applies
+after redundancy selection and keeps line colors. All results remain
 in the table, with **On chart** reflecting visibility and **Filtered out** marking
 hidden non-redundant intervals.
-**Slope filter** defaults to **All slopes**. Choose **Positive slopes** (`slope > 0`),
-**Negative slopes** (`slope < 0`), or **Custom range** with inclusive minimum and
+**Slope filter** defaults to **all**. Choose **positive** (`slope > 0`),
+**negative** (`slope < 0`), or **range** with inclusive minimum and
 maximum bounds. Bounds use signed fitted **log-price change per source bar**, shown
 in the table and hover; this differs from the unsigned **Normalized slope** score.
 For example, `0.001` corresponds to approximately `+0.10005%` per bar. Custom bounds
 are retained when switching modes; zero matches only All slopes or a range containing
 zero. A trend must pass both the λ and slope filters and the redundancy visibility
-setting. Changes update overlays without rerunning analysis or resetting chart
-navigation. Invalid ranges show an error and hide overlays until corrected.
+setting. Display changes take effect immediately and preserve chart navigation.
+Invalid ranges show an error and retain the last valid display; they do not
+change calculation settings or discard the complete results.
 
 Intervals carry all numerical **lambda (λ)** penalties that discovered their
 boundaries, together with their penalty-grid levels. A single boundary can be
@@ -273,8 +432,7 @@ from configuration before historical analysis. **Starting λ** (stored as
 sets the multiplier between values to `2 ** step`, and **Number of λ levels**
 sets the grid size (1–256). Defaults are starting λ **1**, step **1**, and **20**
 levels: 1, 2, 4, ..., 524288. For example, starting λ 2.1, step 3, and 4 levels
-produce 2.1, 16.8, 134.4, 1075.2 at every endpoint. **Fixed λ grid preview** shows
-the configured values. No price data, endpoint bar count, or future observations
+produce 2.1, 16.8, 134.4, 1075.2 at every endpoint. No price data, endpoint bar count, or future observations
 determine the grid, and it is not shortened when multiple levels choose the
 same interval. The configured largest λ does not guarantee a no-split solution;
 increase the level count if you want to test larger penalties. Volatility
@@ -283,23 +441,13 @@ Adding observations can change which archived intervals represent nearby
 results on the chart, but cannot change an earlier interval's metrics or λ
 provenance when its inputs and configuration are unchanged.
 
-The applied settings are saved atomically in `.local/trend_config.json` relative
-to this checkout, shared across tickers and dashboard sessions. They survive
-restarts and are Git-ignored. Market data also saves unapplied parameter edits in
-its workspace; they take effect only after **Apply and analyze**. **Restore trend
-defaults** persists the defaults and invalidates the previous analysis. Invalid
-saved settings produce a warning instead of being silently overwritten. If two
-dashboard sessions save settings, the last save wins; each displayed analysis
-still carries the configuration that produced it.
-Older saved bar-based redundancy settings load with the new 5%/AND defaults
-and a migration notice; other saved settings are preserved. The old file remains
-unchanged until **Apply and analyze** saves the new format. Explicit percentage
-and boundary-rule values take precedence if a file contains both formats.
-Older penalty settings retain their numeric multiplier and grid step; the
-multiplier now means **Starting λ**, and missing level counts default to 20.
-A migration notice explains this change; review the grid preview and apply to
-save the new format. Existing analysis caches are invalidated by the algorithm
-version change.
+Trend settings now belong to each selected logic instance and are saved in the
+Market data workspace, including unapplied drafts. The old
+`.local/trend_config.json` remains a compatibility input during the first
+workspace migration; applying chart logic does not overwrite it. Existing trend
+selections, draft settings, λ/slope filters, and compatible analysis snapshots
+migrate automatically. An incompatible snapshot requires Apply. Adding multiple
+trend instances allows different configurations on the same chart.
 
 Each endpoint uses at most **Maximum lookback per endpoint (bars)** preceding
 observations, including that endpoint (default and maximum: 2,000). At least

@@ -1,0 +1,44 @@
+"""One-time compatibility for the former trend-only result snapshot."""
+
+from chart_logics import AppliedRun, LogicSpec
+from chart_logics.runner import source_key
+
+
+def restore_legacy_analysis(memory, selection, runner, context):
+    """Reuse a verified old result without recalculating or changing its inputs."""
+    saved = selection.get("applied", [])
+    if (len(saved) != 1 or saved[0].get("instance_id") != "legacy-trend-analysis"
+            or memory.chart_analysis_path.exists()):
+        return None
+    try:
+        from dashboard.trends import _result_key
+        from trend_analysis import TrendConfig
+
+        spec, = runner.validate([LogicSpec.from_dict(saved[0])])
+        if spec.name != "trend":
+            return None
+        values = {**TrendConfig().to_dict(), **spec.config}
+        display = selection.get("display", {}).get(spec.instance_id, {}).get("config", {})
+        values.update({key: value for key, value in display.items() if key in values})
+        config = TrendConfig.from_dict(values)
+        key = _result_key(context.completed_frame, timeframe=context.timeframe,
+                          identity=context.identity, as_of=None, config=config)
+        if memory.values.get("analysis_key") != key:
+            return None
+        legacy = memory.load_analysis(key, config)
+        if legacy is None:
+            return None
+        result = runner.registry.create(spec.name, spec.version).from_analysis(legacy, spec.config)
+        runner._validate_output(result)
+        run = AppliedRun(source_key(context), [spec], {spec.instance_id: result}, {},
+                         {spec.instance_id: runner._key(spec, context)})
+        # Restoration revalidates the new contract and primes the shared cache.
+        snapshot = runner.snapshot(run)
+        restored = runner.restore(snapshot, context)
+        if restored is not None:
+            memory.save_chart_analysis(snapshot)
+            selection["applied"] = [spec.to_dict()]
+        return restored
+    except (OSError, AttributeError, KeyError, TypeError, ValueError):
+        # Settings remain migrated even when the old result needs a fresh Apply.
+        return None
