@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 import polars as pl
 
-from chart_logics import BaseChartLogic, LogicContext, LogicRegistry, LogicResult, LogicRunner, LogicSpec
+from research.analysis import BaseChartLogic, LogicContext, LogicRegistry, LogicResult, LogicRunner, LogicSpec
 
 
 class Levels(BaseChartLogic):
@@ -173,8 +173,8 @@ def test_saved_trend_archive_uses_earliest_endpoint_without_recalculation(monkey
     from dataclasses import replace
     import json
 
-    from chart_logics.plugins import trend as module
-    from trend_analysis import analyze
+    from research.analysis.builtins import trend as module
+    from research.analysis.trend import analyze
 
     frame = pl.DataFrame({
         "timestamp": [datetime(2024, 1, day, tzinfo=UTC) for day in range(1, 13)],

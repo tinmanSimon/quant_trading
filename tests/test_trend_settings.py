@@ -5,7 +5,7 @@ import json
 import pytest
 
 from dashboard.trend_settings import SCHEMA_VERSION, load_trend_settings, save_trend_settings
-from trend_analysis import TrendConfig
+from research.analysis.trend import TrendConfig
 
 
 def test_missing_settings_use_defaults_without_writing(tmp_path):

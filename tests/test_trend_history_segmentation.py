@@ -5,9 +5,9 @@ from time import perf_counter
 import numpy as np
 import pytest
 
-from trend_analysis.models import TrendConfig
-from trend_analysis.scoring import volatility
-from trend_analysis.segmentation import LinearCosts, PrefixSegmentations, candidate_provenance, candidate_starts
+from research.analysis.trend.models import TrendConfig
+from research.analysis.trend.scoring import volatility
+from research.analysis.trend.segmentation import LinearCosts, PrefixSegmentations, candidate_provenance, candidate_starts
 
 
 @pytest.mark.parametrize("config", [

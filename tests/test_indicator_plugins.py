@@ -7,9 +7,9 @@ import math
 import polars as pl
 import pytest
 
-import market_indicators
-from chart_logics import LogicContext, LogicRegistry, LogicResult, LogicRunner, LogicSpec, discover_logics
-from chart_logics.plugins.indicators import (
+from research.analysis import indicators
+from research.analysis import LogicContext, LogicRegistry, LogicResult, LogicRunner, LogicSpec, discover_logics
+from research.analysis.builtins.indicators import (
     ADXLogic, ATRLogic, BollingerBandsLogic, MACDLogic, MovingAverageLogic,
     OBVLogic, RSILogic, StochasticLogic,
 )
@@ -61,7 +61,7 @@ def test_full_resolution_archive_and_panel_match_independent_package(cls):
     before = frame.clone()
     logic = cls()
     config = logic.validate({})
-    expected = getattr(market_indicators, logic.function)(frame, **config)
+    expected = getattr(indicators, logic.function)(frame, **config)
     calls = []
     raw = logic.calculate(context(frame), config, progress=lambda *args: calls.append(args))
     assert calls == [(1, 1)]
@@ -115,7 +115,7 @@ def test_moving_averages_share_axes_and_restore_existing_archives_without_recalc
     snapshot = runner.snapshot(run)
     # The pre-grouping archive format remains usable, including its old panel title.
     assert snapshot["results"]["fast"]["data"]["panel"] == {"id": "indicator", "title": "SMA (20, close)"}
-    monkeypatch.setattr(market_indicators, "moving_average",
+    monkeypatch.setattr(indicators, "moving_average",
                         lambda *a, **k: pytest.fail("Presentation recalculated an average"))
     restored = LogicRunner(registry(), output_validator=validate_overlay).restore(snapshot, ctx)
     assert restored is not None
@@ -158,7 +158,7 @@ def test_custom_parameters_route_to_shared_calculations(cls, config):
     logic = cls()
     config = logic.validate(config)
     raw = logic.calculate(context(frame), config)
-    expected = getattr(market_indicators, logic.function)(frame, **config)
+    expected = getattr(indicators, logic.function)(frame, **config)
     assert raw.tables[0]["rows"] == rows(expected.frame)
     assert raw.data["metadata"]["parameters"] == expected.metadata["parameters"]
     assert raw.data["panel"]["title"] == logic.title(config)
@@ -176,7 +176,7 @@ def test_supporting_history_initializes_values_then_rebases_selected_rows(cls):
     logic = cls()
     config = logic.validate({})
     raw = logic.calculate(context(selected, support), config)
-    expected = getattr(market_indicators, logic.function)(frame.head(100), **config).frame.slice(80)
+    expected = getattr(indicators, logic.function)(frame.head(100), **config).frame.slice(80)
     expected = expected.with_columns((pl.col("source_index") - 80).alias("source_index"))
     assert raw.tables[0]["rows"] == rows(expected)
     assert raw.data["metadata"]["initialization_bars"] == 80
@@ -190,7 +190,7 @@ def test_display_colors_reference_levels_and_visibility_never_recalculate(monkey
     logic = RSILogic()
     raw = logic.calculate(context(bars()), {"period": 7})
     archive = raw.to_dict()
-    monkeypatch.setattr(market_indicators, "rsi", lambda *a, **k: pytest.fail("Display recalculated RSI"))
+    monkeypatch.setattr(indicators, "rsi", lambda *a, **k: pytest.fail("Display recalculated RSI"))
     shown = presented(logic, raw, value_color="#123456", line_width=3,
                       reference_levels=[25, 75], reference_color="#654321")
     assert shown.overlays[0]["line"] == {"color": "#123456", "width": 3}
@@ -225,13 +225,13 @@ def test_instances_cache_independently_and_restore_without_recalculation(monkeyp
     runner = LogicRunner(registry(), output_validator=validate_overlay)
     ctx = context(bars())
     calls = []
-    original = market_indicators.rsi
+    original = indicators.rsi
 
     def calculate(*args, **kwargs):
         calls.append(kwargs["period"])
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(market_indicators, "rsi", calculate)
+    monkeypatch.setattr(indicators, "rsi", calculate)
     specs = [LogicSpec("rsi-a", RSILogic.name, RSILogic.version, {"period": 7}),
              LogicSpec("rsi-b", RSILogic.name, RSILogic.version, {"period": 14})]
     run = runner.apply(specs, ctx)
@@ -314,7 +314,7 @@ def test_invalid_live_settings_are_rejected(config):
 def test_configured_price_source_does_not_require_close_or_volume():
     frame = bars().select("timestamp", "open")
     result = RSILogic().calculate(context(frame), {"price_col": "open"})
-    assert result.tables[0]["rows"] == rows(market_indicators.rsi(frame, price_col="open").frame)
+    assert result.tables[0]["rows"] == rows(indicators.rsi(frame, price_col="open").frame)
     with pytest.raises(ValueError, match="volume"):
         OBVLogic().calculate(context(frame), {"price_col": "open"})
     with pytest.raises(ValueError, match="close"):

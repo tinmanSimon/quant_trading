@@ -6,14 +6,14 @@ import numpy as np
 import polars as pl
 from streamlit.testing.v1 import AppTest
 
-from chart_logics.plugins.indicators import MACDLogic, RSILogic
+from research.analysis.builtins.indicators import MACDLogic, RSILogic
 from dashboard.workspace import MarketMemory
 from data_pipeline import DataRequest
 from research import Research
 
 
-def test_market_indicators_customize_add_remove_and_restore(tmp_path, monkeypatch):
-    import market_indicators
+def test_indicators_customize_add_remove_and_restore(tmp_path, monkeypatch):
+    from research.analysis import indicators
     from dashboard import app as dashboard, trend_settings
 
     research = Research(tmp_path / "data", tmp_path / "runs")
@@ -27,14 +27,14 @@ def test_market_indicators_customize_add_remove_and_restore(tmp_path, monkeypatc
                                               timeframe="1d"), frame)
     monkeypatch.setattr(dashboard, "Research", lambda **kwargs: research)
     monkeypatch.setattr(trend_settings, "DEFAULT_SETTINGS_PATH", tmp_path / "trend.json")
-    rsi = market_indicators.rsi
+    rsi = indicators.rsi
     calls = []
 
     def counted(*args, **kwargs):
         calls.append(kwargs["period"])
         return rsi(*args, **kwargs)
 
-    monkeypatch.setattr(market_indicators, "rsi", counted)
+    monkeypatch.setattr(indicators, "rsi", counted)
     rendered = []
     render = dashboard.render_series_chart
 

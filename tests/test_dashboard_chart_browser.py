@@ -228,7 +228,7 @@ def test_chart_browser_interactions(tmp_path, single, latest):
 
 
 def _run_browser_document(tmp_path, document=None, *, url=None, browser_js=None, screenshot_path=None,
-                          timeout_seconds=45, native_clicks=False):
+                          timeout_seconds=45, native_clicks=False, metrics_expression=None):
     browser = next((found for name in ("google-chrome", "chromium", "chromium-browser")
                     if (found := shutil.which(name))), None)
     assert browser, "Install Chrome/Chromium to run --run-browser tests."
@@ -319,6 +319,9 @@ def _run_browser_document(tmp_path, document=None, *, url=None, browser_js=None,
                     time.sleep(0.2)
                     captured = command("Page.captureScreenshot", format="png", fromSurface=True)
                     screenshot_path.write_bytes(b64decode(captured["data"]))
+                if metrics_expression:
+                    metrics = command("Runtime.evaluate", expression=metrics_expression, returnByValue=True)
+                    return metrics.get("result", {}).get("value")
         finally:
             process.terminate()
             try:

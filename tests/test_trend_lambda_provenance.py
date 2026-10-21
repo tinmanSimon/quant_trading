@@ -8,10 +8,10 @@ import numpy as np
 import polars as pl
 import pytest
 
-from trend_analysis import TrendConfig, analyze_current
-from trend_analysis.scoring import volatility
-from trend_analysis.segmentation import LinearCosts, candidate_provenance, candidate_starts
-from trend_analysis.tails import TailInfo
+from research.analysis.trend import TrendConfig, analyze_current
+from research.analysis.trend.scoring import volatility
+from research.analysis.trend.segmentation import LinearCosts, candidate_provenance, candidate_starts
+from research.analysis.trend.tails import TailInfo
 
 
 def prices(values):
@@ -86,7 +86,7 @@ def test_tail_only_candidate_has_no_invented_lambda_and_both_nearby_intervals_su
 
 
 def test_tail_promotion_preserves_an_existing_segmentation_candidates_lambdas(monkeypatch):
-    import trend_analysis.api as api
+    import research.analysis.trend.api as api
 
     frame = prices(np.arange(100) ** 2 * .0001)
     expected = next(t for t in analyze_current(frame).trends if t.start_index == 50)

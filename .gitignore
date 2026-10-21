@@ -2,6 +2,7 @@
 data/
 runs/
 /private_strategies/
+/secrete_analysis/
 *.csv
 *.parquet
 *.db

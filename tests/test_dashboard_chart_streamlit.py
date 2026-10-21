@@ -432,7 +432,7 @@ def test_chart_streamlit_window_round_trips(tmp_path):
         DataRequest("TEST", stamps[0], stamps[-1] + timedelta(hours=1), timeframe="1h"), frame)
     app = tmp_path / "chart_app.py"
     from dashboard.trend_settings import load_trend_settings, save_trend_settings
-    from trend_analysis import TrendConfig
+    from research.analysis.trend import TrendConfig
 
     settings_path = tmp_path / "trend_config.json"
     saved_settings = TrendConfig(max_history=8, redundancy_percentage=25.0,
@@ -443,9 +443,11 @@ def test_chart_streamlit_window_round_trips(tmp_path):
     app.write_text(
         "import streamlit as st\nfrom dashboard.app import _data_page\nfrom research import Research\n"
         "from pathlib import Path\nimport dashboard.trend_settings as settings\nimport dashboard.workspace as workspace\n"
+        "from research.analysis import loader as analysis_loader\n"
+        f"analysis_loader.project_root = lambda: Path({str(tmp_path / 'private-test-project')!r})\n"
         f"settings.DEFAULT_SETTINGS_PATH = Path({str(settings_path)!r})\n"
         f"workspace.DEFAULT_DIRECTORY = Path({str(tmp_path / 'workspaces')!r})\n"
-        "import chart_logics.plugins.trend as trend_plugin\n"
+        "import research.analysis.builtins.trend as trend_plugin\n"
         "if not getattr(trend_plugin.analyze, '_browser_counter', False):\n"
         "    def instrument(original):\n"
         "        def counted(*args, **kwargs):\n"

@@ -8,12 +8,12 @@ import math
 import polars as pl
 import pytest
 
-from chart_logics.base import LogicContext, LogicResult
-from chart_logics.plugins.open_price_bands import OpenPriceBandsLogic
-from chart_logics.plugins.trend import TrendLogic
-from chart_logics.registry import discover_logics
+from research.analysis.base import LogicContext, LogicResult
+from research.analysis.builtins.open_price_bands import OpenPriceBandsLogic
+from research.analysis.builtins.trend import TrendLogic
+from research.analysis.registry import discover_logics
 from dashboard.trend_selection import select_trends
-from trend_analysis import TrendConfig, analyze
+from research.analysis.trend import TrendConfig, analyze
 
 
 def bars(stamps, opens=None):
@@ -174,7 +174,7 @@ def trend_input():
 
 
 def test_trend_adapter_preserves_fit_coordinates_metrics_and_table_statuses(trend_input, monkeypatch):
-    from chart_logics.plugins import trend as module
+    from research.analysis.builtins import trend as module
     frame, settings, analysis = trend_input
     monkeypatch.setattr(module, "analyze", lambda *args, **kwargs: analysis)
     logic = TrendLogic()
@@ -200,7 +200,7 @@ def test_trend_adapter_preserves_fit_coordinates_metrics_and_table_statuses(tren
 
 
 def test_trend_filters_hide_lines_without_dropping_archive_or_recalculating(trend_input, monkeypatch):
-    from chart_logics.plugins import trend as module
+    from research.analysis.builtins import trend as module
     frame, settings, analysis = trend_input
     calculations = []
 
@@ -273,7 +273,7 @@ def test_trend_display_validation(trend_input, values):
 
 
 def test_redundancy_is_display_only_and_can_restore_all_fits(trend_input, monkeypatch):
-    from chart_logics.plugins import trend as module
+    from research.analysis.builtins import trend as module
     _, settings, analysis = trend_input
     logic = TrendLogic()
     raw = logic.from_analysis(analysis, trend_configured(settings))
@@ -289,7 +289,7 @@ def test_redundancy_is_display_only_and_can_restore_all_fits(trend_input, monkey
 
 
 def test_trend_analysis_receives_only_completed_original_prefix(trend_input, monkeypatch):
-    from chart_logics.plugins import trend as module
+    from research.analysis.builtins import trend as module
     frame, settings, analysis = trend_input
     captured = []
 
@@ -313,7 +313,7 @@ def test_trend_analysis_receives_only_completed_original_prefix(trend_input, mon
 
 
 def test_tail_derived_trend_remains_selectable_without_lambda(trend_input, monkeypatch):
-    from chart_logics.plugins import trend as module
+    from research.analysis.builtins import trend as module
     frame, settings, analysis = trend_input
     tail = replace(analysis.trends[-1], trend_id="tail-example", lambda_values=(), lambda_levels=(),
                    origin="tail", direction=-1, slope=-.002)
@@ -332,7 +332,7 @@ def test_tail_derived_trend_remains_selectable_without_lambda(trend_input, monke
 
 
 def test_saved_trend_adapter_reuses_verified_result_and_rejects_wrong_settings(trend_input, monkeypatch):
-    from chart_logics.plugins import trend as module
+    from research.analysis.builtins import trend as module
     _, settings, analysis = trend_input
     monkeypatch.setattr(module, "analyze", lambda *args, **kwargs: pytest.fail("Saved result was recomputed"))
     logic = TrendLogic()
@@ -401,7 +401,7 @@ def test_builtin_calculation_and_display_schemas_are_separate():
 
 
 def test_hidden_trend_instance_has_consistent_messages_and_table_flags(trend_input):
-    from chart_logics import AppliedRun, LogicRunner, LogicSpec
+    from research.analysis import AppliedRun, LogicRunner, LogicSpec
 
     _, settings, analysis = trend_input
     logic = TrendLogic()

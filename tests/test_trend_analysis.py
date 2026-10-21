@@ -10,10 +10,10 @@ import polars as pl
 from polars.testing import assert_frame_equal
 import pytest
 
-from trend_analysis import ALGORITHM_VERSION, TrendConfig, analyze_current as analyze, replay
-from trend_analysis.scoring import Scorer, prefix_robust_slopes, volatility
-from trend_analysis.segmentation import LinearCosts, candidate_starts
-from trend_analysis.tails import diagnose
+from research.analysis.trend import ALGORITHM_VERSION, TrendConfig, analyze_current as analyze, replay
+from research.analysis.trend.scoring import Scorer, prefix_robust_slopes, volatility
+from research.analysis.trend.segmentation import LinearCosts, candidate_starts
+from research.analysis.trend.tails import diagnose
 
 
 def prices(log_path):

@@ -20,7 +20,7 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-dashboard = ["*.js"]
+"dashboard.charts" = ["assets/*.js"]
 
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}

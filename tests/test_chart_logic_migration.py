@@ -7,12 +7,12 @@ import math
 
 import polars as pl
 
-from chart_logics import LogicContext, LogicRegistry, LogicRunner, LogicSpec, discover_logics
-from chart_logics.plugins.trend import TrendLogic
+from research.analysis import LogicContext, LogicRegistry, LogicRunner, LogicSpec, discover_logics
+from research.analysis.builtins.trend import TrendLogic
 from dashboard.logic_migration import restore_legacy_analysis, upgrade_trend_windows
 from dashboard.trends import _result_key
 from dashboard.workspace import MarketMemory
-from trend_analysis import TrendConfig, analyze
+from research.analysis.trend import TrendConfig, analyze
 
 
 def saved_legacy(tmp_path):
@@ -40,7 +40,7 @@ def test_compatible_legacy_snapshot_reuses_analysis_and_primes_cache(tmp_path, m
     def fail(*args, **kwargs):
         raise AssertionError("Migration must not recalculate trends")
 
-    monkeypatch.setattr("chart_logics.plugins.trend.analyze", fail)
+    monkeypatch.setattr("research.analysis.builtins.trend.analyze", fail)
     run = restore_legacy_analysis(memory, selection, runner, context)
     assert run is not None
     assert len(run.results["legacy-trend-analysis"].tables[0]["rows"]) == len(old.trends)

@@ -55,7 +55,7 @@ def test_workspace_save_failure_keeps_session_values(tmp_path, monkeypatch):
 @pytest.fixture
 def market(tmp_path, monkeypatch):
     from dashboard import app as dashboard, trend_settings
-    from chart_logics.plugins import trend as trends
+    from research.analysis.builtins import trend as trends
     research = Research(tmp_path / "data", tmp_path / "runs")
     for symbol, timeframe, count in (("AAA", "1d", 30), ("TEST", "1d", 30), ("TEST", "1h", 800)):
         delta = timedelta(hours=1) if timeframe == "1h" else timedelta(days=1)
@@ -90,7 +90,7 @@ def _apply(app):
 
 
 def _add_trend(app):
-    from chart_logics.plugins.trend import TrendLogic
+    from research.analysis.builtins.trend import TrendLogic
     app.selectbox(key="chart-logic-add-choice").set_value(("trend", TrendLogic.version)).run()
     app.button(key="chart-logic-add").click().run()
     instance_id = next(button.key.removeprefix("chart-logic-remove-")

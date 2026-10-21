@@ -6,10 +6,10 @@ import math
 import numpy as np
 import pytest
 
-from trend_analysis import TrendConfig
-from trend_analysis.scoring import Scorer
-from trend_analysis.segmentation import LinearCosts
-from trend_analysis.tails import TailInfo, diagnose
+from research.analysis.trend import TrendConfig
+from research.analysis.trend.scoring import Scorer
+from research.analysis.trend.segmentation import LinearCosts
+from research.analysis.trend.tails import TailInfo, diagnose
 
 
 def exhaustive_tail(start, scorer):

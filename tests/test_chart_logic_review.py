@@ -7,12 +7,12 @@ import polars as pl
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from chart_logics import BaseChartLogic, LogicContext, LogicRegistry, LogicResult, LogicRunner, LogicSpec
+from research.analysis import BaseChartLogic, LogicContext, LogicRegistry, LogicResult, LogicRunner, LogicSpec
 from dashboard.workspace import MarketMemory
 
 
 PLUGIN = '''
-from chart_logics import BaseChartLogic, LogicResult
+from research.analysis import BaseChartLogic, LogicResult
 
 class CustomLevel(BaseChartLogic):
     name = 'review_level'
@@ -34,7 +34,7 @@ def _script(package):
 from datetime import UTC, datetime
 import polars as pl
 import streamlit as st
-from chart_logics import LogicContext, discover_logics
+from research.analysis import LogicContext, discover_logics
 from dashboard.chart_data import ChartSeries
 from dashboard.chart_component import window_payload
 from dashboard.logic_controls import render_logic_controls, render_logic_results
@@ -133,7 +133,7 @@ def test_malformed_saved_numeric_setting_does_not_abort_the_chart(tmp_path, monk
 ])
 def test_boolean_json_schemas_use_editable_json_and_validate(tmp_path, monkeypatch, properties, config):
     import json
-    from chart_logics import discover_logics
+    from research.analysis import discover_logics
 
     name, package = _package(tmp_path, monkeypatch)
     original_properties = "{'offset': {'type': 'number', 'default': 5., 'title': 'Custom offset'}}"
@@ -233,7 +233,7 @@ def test_result_table_render_failure_keeps_chart_available(tmp_path, monkeypatch
 
 
 def test_new_module_supplies_live_suggested_filters_without_dashboard_edits(tmp_path, monkeypatch):
-    from chart_logics import discover_logics
+    from research.analysis import discover_logics
 
     name, package = _package(tmp_path, monkeypatch)
     plugin = PLUGIN.replace("        values = [value + config['offset']", "        type(self).calls += 1\n        values = [value + config['offset']") + '''

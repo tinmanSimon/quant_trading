@@ -5,7 +5,7 @@ from copy import deepcopy
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from chart_logics import BaseChartLogic, LogicRegistry, LogicResult, LogicSpec
+from research.analysis import BaseChartLogic, LogicRegistry, LogicResult, LogicSpec
 from dashboard.workspace import MarketMemory
 
 
@@ -71,7 +71,7 @@ def logic_panel(monkeypatch):
 from datetime import UTC, datetime
 import polars as pl
 import streamlit as st
-from chart_logics import LogicContext
+from research.analysis import LogicContext
 from dashboard.logic_controls import render_logic_controls, render_logic_display_controls, render_logic_results
 from dashboard.workspace import market_memory
 source = st.selectbox('Source', ['First', 'Second'], key='source')
@@ -195,10 +195,10 @@ def test_missing_saved_module_preserves_configuration_and_can_be_removed(logic_p
 
 
 def test_legacy_trend_settings_migrate_draft_and_applied_separately(tmp_path, monkeypatch):
-    from chart_logics import discover_logics
+    from research.analysis import discover_logics
     from dashboard import trend_settings
     from dashboard.logic_controls import _legacy_selection
-    from trend_analysis import TrendConfig
+    from research.analysis.trend import TrendConfig
 
     monkeypatch.setattr(trend_settings, "DEFAULT_SETTINGS_PATH", tmp_path / "trend.json")
     memory = MarketMemory("legacy-trend", tmp_path / "memory")
@@ -233,7 +233,7 @@ def test_market_page_combines_builtin_logics_and_keeps_chart_stable(tmp_path, mo
     import math
 
     import polars as pl
-    from chart_logics.plugins.trend import TrendLogic
+    from research.analysis.builtins.trend import TrendLogic
     from dashboard import app as dashboard, trend_settings
     from data_pipeline import DataRequest
     from research import Research

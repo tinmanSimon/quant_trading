@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from trend_analysis import TrendConfig, analyze, penalty_grid
+from research.analysis.trend import TrendConfig, analyze, penalty_grid
 from test_trend_history import prices
 
 
@@ -35,8 +35,8 @@ def test_flat_prices_do_not_shorten_the_configured_grid():
 
 
 def test_grid_is_built_once_for_whole_history(monkeypatch):
-    import trend_analysis.api as api
-    import trend_analysis.segmentation as segmentation
+    import research.analysis.trend.api as api
+    import research.analysis.trend.segmentation as segmentation
 
     calls = []
 

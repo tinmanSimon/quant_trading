@@ -10,7 +10,7 @@ from streamlit.testing.v1 import AppTest
 
 from dashboard.trend_settings import load_trend_settings, save_trend_settings
 from dashboard.trend_selection import TrendSelection
-from trend_analysis import TrendConfig
+from research.analysis.trend import TrendConfig
 
 
 def _element(elements, label):
@@ -289,7 +289,7 @@ def test_cache_is_bounded_and_recent_selection_can_be_reused(trend_page):
 
 def test_real_engine_result_renders_rates_in_percent(trend_page, monkeypatch):
     import dashboard.trends as trends
-    from trend_analysis import analyze
+    from research.analysis.trend import analyze
     app, source, _ = trend_page
     monkeypatch.setattr(trends, "analyze", analyze)
     _enable(app)

@@ -8,7 +8,7 @@ import polars as pl
 from polars.testing import assert_frame_equal
 import pytest
 
-import market_indicators as indicators
+from research.analysis import indicators
 
 
 def bars(prices, *, volume=None):

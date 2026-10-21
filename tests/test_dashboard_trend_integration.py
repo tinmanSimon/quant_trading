@@ -9,11 +9,11 @@ from streamlit.testing.v1 import AppTest
 
 from data_pipeline import DataRequest
 from research import Research
-from trend_analysis import TrendConfig
+from research.analysis.trend import TrendConfig
 
 
 def test_market_page_applies_saved_settings_and_hides_stale_results(tmp_path, monkeypatch):
-    from chart_logics.plugins import trend as trend_plugin
+    from research.analysis.builtins import trend as trend_plugin
     from dashboard import app as dashboard
     from dashboard import trend_settings
 

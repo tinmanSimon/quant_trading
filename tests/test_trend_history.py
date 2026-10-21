@@ -7,7 +7,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-from trend_analysis import TrendConfig, analyze, analyze_current, analyze_history, replay
+from research.analysis.trend import TrendConfig, analyze, analyze_current, analyze_history, replay
 
 
 def prices(values):
@@ -107,7 +107,7 @@ def test_history_above_former_rolling_work_budget_analyzes_every_eligible_endpoi
     np.r_[np.zeros(30), np.ones(20), np.zeros(20)],
 ])
 def test_block_endpoints_match_independent_window_fits(path):
-    from trend_analysis.api import _describe
+    from research.analysis.trend.api import _describe
 
     config = TrendConfig(max_history=16)
     frame = prices(path)
@@ -146,7 +146,7 @@ def test_expired_context_cannot_affect_later_windows():
 
 
 def test_only_window_shifts_rebuild_segmentation_and_overlap_is_not_republished(monkeypatch):
-    import trend_analysis.api as api
+    import research.analysis.trend.api as api
 
     built = []
     original = api.PrefixSegmentations

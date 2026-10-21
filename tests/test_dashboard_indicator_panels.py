@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from chart_logics.base import LogicResult
+from research.analysis.base import LogicResult
 from dashboard.chart_component import _javascript, window_payload
 from dashboard.chart_overlays import MAX_OVERLAY_POINTS, overlay_traces, validate_overlay, window_overlays
 from test_dashboard_chart_browser import _run_browser_document
@@ -200,8 +200,8 @@ def test_indicator_panels_navigation_scaling_and_display_revision_races(tmp_path
 def test_moving_average_crossovers_share_scale_and_preserve_navigation(tmp_path):
     import math
     import polars as pl
-    from chart_logics import LogicRunner, LogicSpec
-    from chart_logics.plugins.indicators import MovingAverageLogic
+    from research.analysis import LogicRunner, LogicSpec
+    from research.analysis.builtins.indicators import MovingAverageLogic
     from dashboard.chart_data import ChartSeries
     from test_indicator_plugins import bars, context, registry
 

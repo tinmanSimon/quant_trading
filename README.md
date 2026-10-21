@@ -278,6 +278,8 @@ cached independently by its version, settings, and verified source contents.
 Successful results remain available if another calculation fails; the failed
 logic's old output is cleared and its error is shown. Chart navigation changes
 only bounded display samples. Results include each instance's applied settings.
+Finding navigation and viewport loading refresh only the chart section, reusing
+the verified snapshot and prepared layers instead of rebuilding the entire page.
 
 After Apply, **Chart display and filters** appears directly above the chart.
 Every logic has a **Show on chart** toggle; plugins can provide their own display
@@ -312,6 +314,31 @@ opens are reported and skipped, never replaced with the first visible bar. Daily
 provider's daily open; extended-hours opens cannot be inferred from daily bars.
 Weekly/monthly bars support first-bar and each-bar references. Session outputs
 do not connect overnight.
+
+### Private research analyses
+
+Reusable analysis infrastructure, indicators, and trend analysis now live under
+`research.analysis`. Import trend analysis from `research.analysis.trend`.
+Import indicators from `research.analysis.indicators`.
+
+Write ordinary decorated Python functions in the ignored root package
+`secrete_analysis/analyses/`. Typed settings become dashboard controls; scripts
+can use aligned indicator/trend helpers and return custom text, tables, points,
+lines, bands, and navigation events. Add multiple instances through **Chart logic**
+and click **Apply**. Layer display changes reuse calculated results. Above the
+chart, use the searchable findings, **Previous**/**Next**, or select a signal
+table row to jump to the corresponding bars.
+
+The local `ma_rsi_example.py` demonstrates configurable MA crossovers, RSI, and
+optional causal trend confirmation. A generic copy is tracked under
+`examples/secrete_analysis/` for fresh checkouts. **Reload analyses** discovers
+scripts and imports edits; script/helper fingerprints invalidate stale results
+while preserving configured instances. Private Python runs with application
+permissions and should come from trusted local authors.
+
+See [Writing research analyses](docs/analysis_scripts.md) for the toolkit,
+result builders, history/alignment rules, and running the same scripts from
+research without the dashboard.
 
 ### Technical indicators
 
@@ -355,12 +382,12 @@ to 500 rows, initially on the latest page. Chart transport uses bounded samples;
 these samples never replace the calculation or table values. Large datasets
 with many indicators still require time and memory to prepare and save tables.
 
-Research uses the same standalone `market_indicators` package, with no dashboard
+Research uses the same standalone `research.analysis.indicators` package, with no dashboard
 or network dependency. Install the normal project requirements, which pin
 `TA-Lib==0.8.2`, then pass one ordered Polars series:
 
 ```python
-from market_indicators import moving_average, rsi, macd, atr
+from research.analysis.indicators import moving_average, rsi, macd, atr
 
 # bars: Polars DataFrame with unique, increasing Date/Datetime timestamps.
 # Supply earlier history before calculating, then slice the desired research range.
@@ -394,17 +421,17 @@ available in `IndicatorResult.metadata` and the public function docstrings.
 
 ### Adding a chart logic module
 
-Create one Python file under `src/chart_logics/plugins/`. A concrete
+Create one Python file under `src/research/analysis/builtins/`. A concrete
 `BaseChartLogic` subclass is automatically discovered, including subpackages.
 No registry entry, package export, dashboard branch, or renderer edit is needed.
 New modules appear on the next dashboard rerun; restart after editing an already
 imported module. Discovery imports trusted local Python code. Broken imports and
 duplicate name/version pairs are reported without hiding unrelated logics.
 
-For example, save this as `src/chart_logics/plugins/close_offset.py`:
+For example, save this as `src/research/analysis/builtins/close_offset.py`:
 
 ```python
-from chart_logics import BaseChartLogic, LogicResult
+from research.analysis import BaseChartLogic, LogicResult
 
 
 class CloseOffset(BaseChartLogic):
@@ -634,7 +661,7 @@ The independent package accepts an ordered single-series Polars dataframe with
 timezone-aware timestamps and positive finite prices:
 
 ```python
-from trend_analysis import TrendConfig, analyze, analyze_current
+from research.analysis.trend import TrendConfig, analyze, analyze_current
 
 result = analyze(
     frame,
@@ -971,9 +998,19 @@ src/
 │   ├── timeframes.py     # Shared interval durations and workflow choices
 │   ├── strategies/      # Versioned strategies and weighted combinations
 │   ├── backtesting/     # Causal execution, cash accounting and metrics
+│   ├── analysis/        # Script toolkit, registry, execution and plain results
+│   │   ├── indicators/ # Shared numerical indicators
+│   │   ├── trend/      # Historical trend analysis and selection
+│   │   └── builtins/   # Discoverable indicator/trend/open-price analyses
 │   ├── runs.py           # Atomic saved runs and compatible comparisons
 │   └── cli.py            # quant-research command
-└── dashboard/            # Streamlit navigation and Plotly charts
+└── dashboard/
+    ├── app.py            # Streamlit entry and routing
+    ├── pages/            # Market data, fetch, processing, backtests and runs
+    ├── market_data/      # Analysis controls, display, results and navigation
+    ├── charts/           # Series, bounded cache, rendering and browser assets
+    ├── components/       # Shared schema and strategy controls
+    └── state/            # Workspace persistence and migrations
 ```
 
 ## Development setup

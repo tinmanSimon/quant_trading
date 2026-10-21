@@ -7,7 +7,7 @@ import json
 import polars as pl
 import pytest
 
-from chart_logics import BaseChartLogic, LogicContext, LogicRegistry, LogicResult, LogicRunner, LogicSpec, discover_logics
+from research.analysis import BaseChartLogic, LogicContext, LogicRegistry, LogicResult, LogicRunner, LogicSpec, discover_logics
 
 
 def context():
@@ -163,7 +163,7 @@ def test_adding_new_module_discovers_without_registration(tmp_path, monkeypatch)
     monkeypatch.syspath_prepend(str(tmp_path))
     assert discover_logics("extra_chart_logics").definitions() == ()
     (package / "example.py").write_text('''
-from chart_logics import BaseChartLogic, LogicResult
+from research.analysis import BaseChartLogic, LogicResult
 class Example(BaseChartLogic):
     name = "new_example"
     label = "New example"
@@ -197,7 +197,7 @@ def test_broken_import_and_duplicate_identity_do_not_hide_other_logics(tmp_path,
     package.mkdir()
     (package / "__init__.py").write_text("")
     template = '''
-from chart_logics import BaseChartLogic, LogicResult
+from research.analysis import BaseChartLogic, LogicResult
 class Example(BaseChartLogic):
     name = {name!r}
     def calculate(self, context, config, progress=None):
