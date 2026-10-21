@@ -329,8 +329,13 @@ Market data includes these independently configurable chart logics:
 | OBV | Price source | Cumulative signed volume |
 
 Use **Add logic** and **Apply** as above. Multiple instances can compare, for
-example, RSI(7) with RSI(14), or SMA(20) with EMA(50). Every indicator has its own
-panel below price and volume, including moving averages and Bollinger bands.
+example, RSI(7) with RSI(14), or SMA(20) with EMA(50). Indicators appear in
+panels below price and volume. Moving-average instances share one **Moving averages**
+panel and vertical scale, so different periods or types can be compared for
+crossovers. Each retains its own settings, color, visibility and table; hover
+labels identify the average type, period and price source. For a 20-day/60-day
+comparison, use daily bars with periods 20 and 60. Other indicators, including
+Bollinger bands, retain separate panels.
 Horizontal pan and zoom stay synchronized; each panel has its own vertical
 scale. Colors, line widths, individual series visibility, and supported reference
 levels update through **Chart display and filters** without recalculation.
@@ -493,7 +498,9 @@ To place primitives in a synchronized panel below volume, add the same
 `"panel": {"id": "momentum", "title": "Momentum", "range": [0, 100]}`
 declaration to each of them. The optional `range` fixes that panel's vertical
 scale; omit it to autoscale from visible values. Panel IDs are local to each
-logic instance, and all primitives sharing one ID must declare identical panel
+logic instance by default. Set `"scope": "logic"` inside the panel declaration
+to share that panel across instances of the same logic name and version.
+All primitives sharing one ID must declare identical panel
 settings. Panels appear in first-use order. Primitives without `panel` remain
 on the price chart. Hiding every primitive in a panel removes that panel while
 preserving horizontal navigation.

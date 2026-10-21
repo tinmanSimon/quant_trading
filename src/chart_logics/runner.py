@@ -50,7 +50,9 @@ class AppliedRun:
                 item["id"] = f"{spec.instance_id}:{item['id']}"
                 item["instance_id"] = spec.instance_id
                 if item.get("panel") is not None:
-                    item["panel"]["id"] = f"{spec.instance_id}:{item['panel']['id']}"
+                    namespace = (f"logic:{spec.name}:{spec.version}"
+                                 if item["panel"].get("scope") == "logic" else spec.instance_id)
+                    item["panel"]["id"] = f"{namespace}:{item['panel']['id']}"
                 outputs.append(item)
         return outputs
 

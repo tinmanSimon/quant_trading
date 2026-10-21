@@ -138,10 +138,12 @@ def _finite(value):
 
 def validate_panel(panel):
     """Validate an optional independent-axis panel shared by several primitives."""
-    if (not isinstance(panel, dict) or set(panel) - {"id", "title", "range"}
+    if (not isinstance(panel, dict) or set(panel) - {"id", "title", "range", "scope"}
             or any(not isinstance(panel.get(key), str) or not panel[key].strip()
                    for key in ("id", "title"))):
         raise ValueError("Indicator panels require nonempty id and title strings.")
+    if panel.get("scope", "instance") not in ("instance", "logic"):
+        raise ValueError("Indicator panel scope must be instance or logic.")
     limits = panel.get("range")
     if "range" in panel and (not isinstance(limits, list) or len(limits) != 2
                             or not all(_finite(value) for value in limits)

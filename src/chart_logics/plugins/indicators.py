@@ -234,7 +234,7 @@ class _IndicatorLogic(BaseChartLogic):
 class MovingAverageLogic(_IndicatorLogic):
     name = "moving_average"
     label = "Moving average"
-    description = "Simple, exponential, or weighted average in a synchronized indicator panel."
+    description = "Simple, exponential, or weighted average; all moving averages share one panel."
     function = "moving_average"
     series = (("value", "Moving average", "#2563eb"),)
     config_schema = _schema({
@@ -246,6 +246,16 @@ class MovingAverageLogic(_IndicatorLogic):
 
     def title(self, config):
         return f"{config['kind'].upper()} ({config['period']}, {config['price_col']})"
+
+    def present(self, result, config):
+        result = super().present(result, config)
+        # Presentation also handles existing archives without recalculation.
+        label = result.data["panel"]["title"]
+        for overlay in result.overlays:
+            overlay["panel"] = {"id": "moving_averages", "title": "Moving averages", "scope": "logic"}
+            overlay["name"] = label
+            overlay["hovertemplate"] = f"{label}: %{{y:.6g}}<extra></extra>"
+        return result
 
 
 class RSILogic(_IndicatorLogic):

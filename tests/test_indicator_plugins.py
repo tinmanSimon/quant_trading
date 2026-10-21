@@ -75,7 +75,10 @@ def test_full_resolution_archive_and_panel_match_independent_package(cls):
     result = presented(logic, raw)
     assert result.overlays
     for overlay in result.overlays:
-        assert overlay["panel"] == raw.data["panel"]
+        if cls is MovingAverageLogic:
+            assert overlay["panel"] == {"id": "moving_averages", "title": "Moving averages", "scope": "logic"}
+        else:
+            assert overlay["panel"] == raw.data["panel"]
         validate_overlay(overlay)
         if overlay["id"].startswith(("reference_", "histogram_")):
             continue
@@ -95,6 +98,48 @@ def test_all_indicator_classes_discover_with_separate_config_and_display_schemas
         assert logic.input_policy == "completed"
         assert not set(logic.config_schema["properties"]) & set(logic.display_schema["properties"])
         assert found.configure(logic.name, logic.version, {}) == found.defaults(logic.name, logic.version)
+
+
+def test_moving_averages_share_axes_and_restore_existing_archives_without_recalculation(monkeypatch):
+    from dashboard.chart_component import window_payload
+    from dashboard.chart_data import ChartSeries
+
+    frame = bars(180)
+    ctx = context(frame)
+    runner = LogicRunner(registry(), output_validator=validate_overlay)
+    specs = [LogicSpec("fast", MovingAverageLogic.name, MovingAverageLogic.version, {"period": 20}),
+             LogicSpec("slow", MovingAverageLogic.name, MovingAverageLogic.version, {"period": 60}),
+             LogicSpec("rsi-a", RSILogic.name, RSILogic.version, {}),
+             LogicSpec("rsi-b", RSILogic.name, RSILogic.version, {"period": 7})]
+    run = runner.apply(specs, ctx)
+    snapshot = runner.snapshot(run)
+    # The pre-grouping archive format remains usable, including its old panel title.
+    assert snapshot["results"]["fast"]["data"]["panel"] == {"id": "indicator", "title": "SMA (20, close)"}
+    monkeypatch.setattr(market_indicators, "moving_average",
+                        lambda *a, **k: pytest.fail("Presentation recalculated an average"))
+    restored = LogicRunner(registry(), output_validator=validate_overlay).restore(snapshot, ctx)
+    assert restored is not None
+    display = {"fast": {"value_color": "#2563eb"}, "slow": {"value_color": "#f97316"}}
+    shown = runner.present(restored, display)
+    overlays = shown.overlays
+    fast, slow = overlays[:2]
+    assert fast["panel"] == slow["panel"]
+    assert fast["id"] == "fast:value" and slow["id"] == "slow:value"
+    assert fast["name"] == "SMA (20, close)" and slow["name"] == "SMA (60, close)"
+    assert "SMA (60, close)" in slow["hovertemplate"]
+    assert fast["line"]["color"] != slow["line"]["color"]
+    assert len({item["panel"]["id"] for item in overlays}) == 3
+    payload = window_payload(ChartSeries(frame, timeframe="1m"), chart_id="averages", timeframe="1m",
+                             timezone="UTC", overlays=overlays)
+    assert [trace["yaxis"] for trace in payload["figure"]["data"][:4]] == ["y", "y2", "y3", "y3"]
+    assert len(payload["figure"]["layout"]["meta"]["panel_layout"]["panels"]) == 3
+    assert runner.present(restored, display, {"fast": False}).overlays[0] == slow
+    remaining = runner.present(restored, display, {"fast": False, "slow": False}).overlays
+    assert {item["instance_id"] for item in remaining} == {"rsi-a", "rsi-b"}
+    removed = runner.apply(specs[1:], ctx)
+    assert not removed.errors
+    assert runner.present(removed, display).overlays[0] == slow
+    assert runner.snapshot(restored) == snapshot
 
 
 @pytest.mark.parametrize("cls,config", [
