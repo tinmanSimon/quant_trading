@@ -1,7 +1,22 @@
-"""One-time compatibility for the former trend-only result snapshot."""
+"""Compatibility for saved trend selections and former trend-only results."""
 
 from chart_logics import AppliedRun, LogicSpec
 from chart_logics.runner import source_key
+
+
+def upgrade_trend_windows(selection, registry):
+    """Stage the known v4-to-v5 settings upgrade without reusing old results."""
+    version = "1.0.0-engine.5.0.0"
+    if not any(item.name == "trend" and item.version == version for item in registry.definitions()):
+        return False
+    changed = False
+    for spec in selection["draft"]:
+        if (isinstance(spec, dict) and spec.get("name") == "trend"
+                and spec.get("version") == "1.0.0-engine.4.0.0"):
+            spec["version"] = version
+            changed = True
+    # Leave applied specs and archives on their original version until Apply.
+    return changed
 
 
 def restore_legacy_analysis(memory, selection, runner, context):

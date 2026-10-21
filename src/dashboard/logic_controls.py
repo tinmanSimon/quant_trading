@@ -86,6 +86,11 @@ def _saved_selection(memory, registry):
             or not isinstance(selection.get("applied"), list)):
         st.error("Saved chart logic selections are invalid. They were left unchanged.")
         return None
+    from dashboard.logic_migration import upgrade_trend_windows
+
+    if upgrade_trend_windows(selection, registry):
+        st.info("Trend analysis now uses overlapping windows of twice the configured history value. "
+                "Your settings are preserved. Click Apply to calculate the updated analysis.")
     _split_saved_display(selection, memory, registry)
     return selection
 

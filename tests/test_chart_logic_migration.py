@@ -1,14 +1,15 @@
 """Reuse legacy results only when their verified inputs still match."""
 
 from dataclasses import replace
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 import math
 
 import polars as pl
 
-from chart_logics import LogicContext, LogicRunner, LogicSpec, discover_logics
+from chart_logics import LogicContext, LogicRegistry, LogicRunner, LogicSpec, discover_logics
 from chart_logics.plugins.trend import TrendLogic
-from dashboard.logic_migration import restore_legacy_analysis
+from dashboard.logic_migration import restore_legacy_analysis, upgrade_trend_windows
 from dashboard.trends import _result_key
 from dashboard.workspace import MarketMemory
 from trend_analysis import TrendConfig, analyze
@@ -61,3 +62,49 @@ def test_existing_new_snapshot_never_falls_back_to_legacy(tmp_path):
     memory, selection, runner, context, _ = saved_legacy(tmp_path)
     memory.save_chart_analysis({"version": 1, "specs": []})
     assert restore_legacy_analysis(memory, selection, runner, context) is None
+
+
+def test_window_upgrade_preserves_settings_and_requires_fresh_apply(tmp_path):
+    from dashboard.logic_controls import _saved_selection
+
+    memory, selection, _, context, _ = saved_legacy(tmp_path)
+
+    class PreviousTrendLogic(TrendLogic):
+        version = "1.0.0-engine.4.0.0"
+
+    old_registry = LogicRegistry()
+    old_registry.register_class(PreviousTrendLogic)
+    old_runner = LogicRunner(old_registry)
+    for source in ("applied", "draft"):
+        selection[source][0]["version"] = PreviousTrendLogic.version
+        selection[source][0]["config"]["max_history"] = 16
+    old_run = old_runner.apply([LogicSpec.from_dict(selection["applied"][0])], context)
+    assert not old_run.errors
+    snapshot = old_runner.snapshot(old_run)
+    memory.save_chart_analysis(snapshot)
+    selection["draft"][0]["config"]["max_history"] = 24
+    selection["display"] = {"legacy-trend-analysis": {"visible": False, "config": {"show_redundant": True}}}
+    memory.values["chart_logics"] = selection
+    before = deepcopy(selection)
+
+    registry = discover_logics()
+    migrated = _saved_selection(memory, registry)
+    assert migrated["draft"][0] == {**before["draft"][0], "version": TrendLogic.version}
+    assert migrated["applied"] == before["applied"]
+    assert migrated["display"] == before["display"]
+    assert not upgrade_trend_windows(migrated, registry)
+    runner = LogicRunner(registry)
+    assert runner.restore(snapshot, context) is None
+    assert memory.load_chart_analysis() == snapshot
+    fresh = runner.apply([LogicSpec.from_dict(migrated["draft"][0])], context)
+    assert not fresh.errors and fresh.results
+    assert runner.restore(runner.snapshot(fresh), context) is not None
+
+
+def test_window_upgrade_leaves_unrecognized_versions_unchanged():
+    registry = discover_logics()
+    for version in ("1.0.0-engine.3.0.0", "1.0.0-engine.99.0.0"):
+        selection = {"draft": [{"name": "trend", "version": version, "config": {}}]}
+        before = deepcopy(selection)
+        assert not upgrade_trend_windows(selection, registry)
+        assert selection == before

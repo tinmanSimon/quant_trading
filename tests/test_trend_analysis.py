@@ -33,7 +33,7 @@ def test_config_is_immutable_serializable_and_missing_fields_use_defaults():
 
 @pytest.mark.parametrize("changes", [
     {"weight_ols": .5}, {"weight_robust": -.1}, {"clarity_threshold": 1.2},
-    {"boundary_acceptance": -.1}, {"min_segment_length": 7}, {"max_history": 2001},
+    {"boundary_acceptance": -.1}, {"min_segment_length": 7}, {"max_history": 100_001},
     {"min_segment_length": 8.0}, {"max_history": True}, {"magnitude_threshold": 0},
     {"max_tail_fraction": .6}, {"penalty_grid_step": .01}, {"penalty_multiplier": float("nan")},
     {"tail_fit_threshold": "0.3"}, {"min_tail_length": 2001}, {"unknown": 1},
@@ -136,15 +136,15 @@ def test_price_unit_invariance_including_symmetric_segmentation_ties(factor):
         assert first.intercept + np.log(factor) == pytest.approx(second.intercept)
 
 
-def test_history_cap_preserves_global_ordinals_and_onset_flag():
+def test_block_window_preserves_global_ordinals_and_onset_flag():
     frame = prices(np.arange(100) * .001)
     result = analyze(frame, config=TrendConfig(max_history=32))
-    assert result.source_offset == 68
-    assert result.analysis_start == frame["timestamp"][68]
-    assert (result.trends[0].start_index, result.trends[0].end_index) == (68, 99)
+    assert result.source_offset == 64
+    assert result.analysis_start == frame["timestamp"][64]
+    assert (result.trends[0].start_index, result.trends[0].end_index) == (64, 99)
     assert result.trends[0].onset_truncated
     earlier = analyze(frame, as_of=frame["timestamp"][79], config=TrendConfig(max_history=32))
-    assert (earlier.source_offset, earlier.trends[0].end_index) == (48, 79)
+    assert (earlier.source_offset, earlier.trends[0].end_index) == (32, 79)
 
 
 @pytest.mark.parametrize("change", [

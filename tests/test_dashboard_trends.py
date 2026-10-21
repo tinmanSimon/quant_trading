@@ -97,7 +97,7 @@ def test_only_apply_computes_and_ordinary_reruns_reuse_result(trend_page):
 def test_restart_and_widget_removal_preserve_applied_config(trend_page):
     app, source, script = trend_page
     _enable(app)
-    _element(app.number_input, "Maximum lookback per endpoint (bars)").set_value(500)
+    _element(app.number_input, "Window advance and overlap (bars)").set_value(500)
     _element(app.number_input, "Number of λ levels").set_value(4)
     _element(app.number_input, "Minimum redundancy resolution (bars)").set_value(9)
     _element(app.number_input, "Redundancy tolerance (%)").set_value(12)
@@ -107,14 +107,14 @@ def test_restart_and_widget_removal_preserve_applied_config(trend_page):
     assert app.session_state["_test_result"] is None
     app.run()  # Give Streamlit a full hidden run to discard inactive widgets.
     _enable(app)
-    assert _element(app.number_input, "Maximum lookback per endpoint (bars)").value == 500
+    assert _element(app.number_input, "Window advance and overlap (bars)").value == 500
     assert _element(app.number_input, "Minimum redundancy resolution (bars)").value == 9
     assert _element(app.number_input, "Redundancy tolerance (%)").value == 12
     assert _element(app.selectbox, "Boundary matching rule").value == "or"
     assert app.session_state["_test_result"] is not None
     fresh = AppTest.from_string(script).run()
     _enable(fresh)
-    assert _element(fresh.number_input, "Maximum lookback per endpoint (bars)").value == 500
+    assert _element(fresh.number_input, "Window advance and overlap (bars)").value == 500
     assert _element(fresh.number_input, "Number of λ levels").value == 4
     assert _element(fresh.number_input, "Minimum redundancy resolution (bars)").value == 9
     assert load_trend_settings(source.path).config.redundancy_min_bars == 9
@@ -293,7 +293,7 @@ def test_real_engine_result_renders_rates_in_percent(trend_page, monkeypatch):
     app, source, _ = trend_page
     monkeypatch.setattr(trends, "analyze", analyze)
     _enable(app)
-    _element(app.number_input, "Maximum lookback per endpoint (bars)").set_value(16)
+    _element(app.number_input, "Window advance and overlap (bars)").set_value(16)
     _element(app.number_input, "Redundancy tolerance (%)").set_value(25.0)
     _apply(app)
     result = app.session_state["_test_result"]
@@ -304,7 +304,7 @@ def test_real_engine_result_renders_rates_in_percent(trend_page, monkeypatch):
     assert displayed["end_index"].min() == 7
     assert displayed["end_index"].max() == 39
     assert displayed["end_index"].nunique() == 33
-    assert displayed["bars"].max() <= 16
+    assert displayed["bars"].max() == 32
     assert result.analysis_start == source.frame["timestamp"][0]
     assert displayed.iloc[0]["rate_per_bar"] == pytest.approx(result.trends[0].rate_per_bar * 100)
     assert displayed.iloc[0]["trend_id"] == result.trends[0].trend_id

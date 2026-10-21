@@ -118,8 +118,9 @@ class PrefixSegmentations:
     considered. Later observations never determine the costs or penalties of
     an earlier query. Arithmetic is shared; endpoints are not subsampled.
 
-    The table is extended lazily. At the 2,000-bar input limit it contains at
-    most 502,251 states, rather than one independent DP for every endpoint.
+    Each instance covers one window of at most twice ``max_history`` bars.
+    The table is extended lazily; historical analysis rebuilds it only when
+    the window advances, rather than running an independent DP per endpoint.
     """
 
     def __init__(self, values: np.ndarray, config: TrendConfig, *, penalties: np.ndarray | None = None):
@@ -127,8 +128,8 @@ class PrefixSegmentations:
         self.config = config
         self._penalties = np.asarray(penalty_grid(config)) if penalties is None else penalties
         self.n = len(self.values)
-        if self.n > config.max_history:
-            raise ValueError("PrefixSegmentations requires at most max_history observations")
+        if self.n > 2 * config.max_history:
+            raise ValueError("PrefixSegmentations requires at most 2 * max_history observations")
         self.costs = LinearCosts(self.values) if self.n else None
         shape = (self.n + 1, self.n // config.min_segment_length + 1)
         self._errors = np.full(shape, np.inf)

@@ -14,6 +14,7 @@ from trend_analysis.segmentation import LinearCosts, PrefixSegmentations, candid
     TrendConfig(),
     TrendConfig(min_segment_length=12, penalty_multiplier=2.3, penalty_grid_step=.5),
     TrendConfig(penalty_multiplier=.3, penalty_grid_step=2),
+    TrendConfig(max_history=44),
 ])
 @pytest.mark.parametrize("path", [
     np.cumsum(np.random.default_rng(54).normal(.001, .01, 88)),
@@ -68,7 +69,13 @@ def test_prefix_lengths_and_history_limit_are_validated():
     assert shared.candidate_starts(7) == []
     assert PrefixSegmentations(np.array([]), TrendConfig()).candidate_starts(0) == []
     with pytest.raises(ValueError, match="max_history"):
-        PrefixSegmentations(np.arange(21.), TrendConfig(max_history=20))
+        PrefixSegmentations(np.arange(41.), TrendConfig(max_history=20))
+
+
+def test_internal_window_capacity_can_exceed_the_public_setting_limit():
+    config = TrendConfig(max_history=100_000, min_segment_length=100_000)
+    shared = PrefixSegmentations(np.zeros(200_000), config)
+    assert shared.candidate_starts(100_001) == [0]
 
 
 def test_overflowing_penalty_grid_fails_before_allocating_history():

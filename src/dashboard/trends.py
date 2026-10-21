@@ -25,7 +25,7 @@ _CACHE_LIMIT = 4
 
 # (field, label, help, minimum, maximum, step). Defaults come only from TrendConfig.
 _DISCOVERY = (
-    ("max_history", "Maximum lookback per endpoint (bars)", "At each historical endpoint, use at most this many preceding source bars, including that endpoint. Every eligible endpoint in the selected interval is analyzed. This does not limit total coverage; the prototype supports lookbacks up to 2,000 bars.", 8, 2000, 100),
+    ("max_history", "Window advance and overlap (bars)", "Analysis windows hold up to twice this many bars and advance by this many bars. The overlapping half is rebuilt once per shift; each endpoint uses only its window's data through that bar. Every eligible endpoint is analyzed. Values up to 100,000 bars are supported.", 8, 100_000, 100),
     ("min_segment_length", "Minimum segment length (bars)", "Shorter candidate segments are excluded.", 8, 2000, 1),
     ("penalty_multiplier", "Starting λ", "First numerical penalty in the fixed grid shared by every endpoint. Stored as penalty_multiplier for compatibility. Must be positive.", 0.0, None, 0.1),
     ("penalty_grid_step", "Penalty grid step", "Each next λ is multiplied by 2 raised to this value. A step of 3 multiplies by 8. The same grid is used at every endpoint.", 0.25, 4.0, 0.25),
@@ -160,7 +160,7 @@ def render_trend_controls(frame: pl.DataFrame, *, timeframe: str, identity: obje
     if state["warning"]:
         st.warning(state["warning"])
     st.caption("Analyze every eligible historical endpoint across the selected interval using original, completed bars. "
-               "Each endpoint uses only bars available through that time, with the configured lookback. "
+               "Each endpoint uses its active analysis window's bars only through that time. "
                "Long intervals take longer to analyze. Zooming and panning only change the view. "
                "Chart and table results use the last applied settings; form edits take effect when you apply them.")
 
@@ -384,7 +384,7 @@ def render_trend_results(result, *, selection: TrendSelection | None = None,
             "tail_status": st.column_config.TextColumn("Tail status"),
             "retracement": st.column_config.NumberColumn("Retracement fraction", format="%.3f"),
             "onset_truncated": st.column_config.CheckboxColumn(
-                "Touches lookback boundary",
+                "Touches analysis window boundary",
                 help="The interval starts at the earliest bar available to its endpoint analysis; the true start could be earlier.",
             ),
         })

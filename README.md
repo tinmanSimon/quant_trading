@@ -512,16 +512,27 @@ selections, draft settings, λ/slope filters, and compatible analysis snapshots
 migrate automatically. An incompatible snapshot requires Apply. Adding multiple
 trend instances allows different configurations on the same chart.
 
-Each endpoint uses at most **Maximum lookback per endpoint (bars)** preceding
-observations, including that endpoint (default and maximum: 2,000). At least
-eight observations are required for a segment. This limits each calculation's
-lookback, not the historical endpoints reported: successful analysis covers
-the entire selected history once enough observations are available. Historical
-analysis costs more than a single snapshot; progress is shown, results are
-cached, and no endpoints are silently skipped. There is no rolling-work budget
-cutoff on the total input length. Large requests are allowed to run; repeated
-segmentation after the lookback window starts sliding can take substantially
-longer. The per-endpoint lookback remains capped at 2,000 bars. Bars with potentially unfinished periods are
+**Window advance and overlap (bars)** (stored as `max_history`) sets H, with a
+default of 2,000 and a maximum of 100,000. Analysis windows hold up to **2H**
+observations and advance by **H** after reaching their end. For H = 2,000, the
+windows cover bars 1–4,000, 2,001–6,000, 4,001–8,000, and so on. At each shift,
+segmentation is rebuilt for the overlapping H bars, then extended incrementally
+for each new endpoint. Previously published endpoints are not recalculated or
+replaced in the archive. The initial window grows from the minimum segment
+length; after a shift, context grows from H+1 to 2H bars, including the current
+bar. H is no longer a strict per-endpoint lookback limit. Segmentation,
+volatility, scoring, and tail diagnosis use the same active window prefix,
+never observations after the endpoint. Dropping context at a window shift can
+change the discovered trends. Windows are anchored to the first selected input
+bar, so changing the selected history's start can also change later results.
+
+At least eight observations are required for a segment. Every eligible endpoint
+in the selected history is analyzed; progress counts new endpoints, excluding
+overlap rebuilding. Larger settings increase computation and memory use, and
+window shifts can pause progress while their context is rebuilt. Version 5
+results use these window semantics; saved version 4 trend settings are staged
+for the new version and require Apply to recalculate their results.
+Bars with potentially unfinished periods are
 excluded: intraday bars wait their nominal duration; calendar bars wait until
 their labelled period ends in America/New_York. This conservative policy can
 delay inclusion of shortened session bars or an already closed daily session.
@@ -550,9 +561,10 @@ The package has no dashboard, fetching, storage, or market-calendar dependency.
 Callers supply completed observations. An optional `as_of` truncates input at a
 timestamp before any estimation. Input rows must have unique increasing
 timestamps; the package does not fill gaps or alter the dataframe. Source-row
-indices remain relative to the supplied frame, including rolling lookback
+indices remain relative to the supplied frame, including analysis-window
 offsets. `analyze` / `analyze_history` return the historical archive;
-`analyze_current` returns one endpoint's snapshot. `replay` yields independent
+`analyze_current` returns one endpoint's snapshot using the same window boundaries
+as historical analysis of that input prefix. `replay` yields independent
 current snapshots for requested review dates. Historical interval IDs include
 their start and end indices; they are stable within the same source frame.
 

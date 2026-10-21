@@ -8,6 +8,15 @@ import polars as pl
 from .models import TrendConfig
 
 
+def window_start(length: int, history: int) -> int:
+    """Start of the active 2H window, advancing H only after its last bar.
+
+    Length is the exclusive endpoint in the original selected history. The
+    first window starts at zero; subsequent windows retain H bars of overlap.
+    """
+    return max(0, (length - 1) // history - 1) * history
+
+
 def prepare(frame: pl.DataFrame, timestamp_col: str, price_col: str,
             as_of: datetime | date | None, config: TrendConfig, *,
             truncate: bool = True) -> tuple[list, np.ndarray, int]:
@@ -37,5 +46,5 @@ def prepare(frame: pl.DataFrame, timestamp_col: str, price_col: str,
         raise ValueError("Prices must be numeric") from exc
     if not np.isfinite(values).all() or (values <= 0).any():
         raise ValueError("Prices must be finite and strictly positive")
-    offset = max(0, frame.height - config.max_history) if truncate else 0
+    offset = window_start(frame.height, config.max_history) if truncate else 0
     return frame[timestamp_col].slice(offset).to_list(), np.log(values[offset:]), offset

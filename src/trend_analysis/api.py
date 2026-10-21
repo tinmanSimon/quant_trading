@@ -11,7 +11,7 @@ from .models import AnalysisResult, CandidateDiagnostic, Trend, TrendConfig
 from .scoring import Scorer, SharedIntervals, volatility
 from .segmentation import LinearCosts, PenaltyProvenance, PrefixSegmentations, candidate_provenance, penalty_grid
 from .tails import TailInfo, diagnose
-from .validation import prepare
+from .validation import prepare, window_start
 
 
 def analyze_current(frame: pl.DataFrame, *, timestamp_col: str = "timestamp", price_col: str = "close",
@@ -21,7 +21,8 @@ def analyze_current(frame: pl.DataFrame, *, timestamp_col: str = "timestamp", pr
     Timestamps must be unique and increasing. The caller supplies completed
     bars; this package cannot infer an exchange calendar or bar completion.
     Prices are never filled, fetched, modified, or extrapolated. Ordinals in
-    the result refer to the original input, including a max-history offset.
+    the result refer to the original input, including its block-window offset.
+    The active window matches historical analysis of the same input prefix.
     """
     config = TrendConfig() if config is None else config
     if not isinstance(config, TrendConfig):
@@ -122,10 +123,12 @@ def analyze_history(frame: pl.DataFrame, *, timestamp_col: str = "timestamp", pr
                     progress: Callable[[int, int], None] | None = None) -> AnalysisResult:
     """Analyze every eligible historical endpoint and retain all its records.
 
-    ``max_history`` limits lookback at each endpoint, never the returned date
-    span. Each endpoint uses its own completed prefix and volatility. Earlier
-    records are unchanged when future observations are appended. ``progress``
-    receives completed and total eligible endpoint counts, including zero.
+    Windows hold up to twice ``max_history`` bars and advance by ``max_history``
+    after reaching capacity. Rebuild the overlapping context once per shift,
+    then extend segmentation for each new endpoint. Only the active window's
+    prefix through that endpoint determines its analysis and volatility.
+    Earlier records are unchanged when future observations are appended.
+    ``progress`` counts published endpoints, not overlap rebuilding work.
     """
     config = TrendConfig() if config is None else config
     if not isinstance(config, TrendConfig):
@@ -140,25 +143,25 @@ def analyze_history(frame: pl.DataFrame, *, timestamp_col: str = "timestamp", pr
                        config=config, analysis_mode="history")
     if not total:
         return AnalysisResult((), (), "insufficient_data", **result_args)
-    initial_length = min(n, config.max_history)
+    capacity = 2 * config.max_history
     penalties = np.asarray(penalty_grid(config))
-    partitions = PrefixSegmentations(values[:initial_length], config, penalties=penalties)
-    initial_costs = LinearCosts(values[:initial_length])
-    shared = SharedIntervals(values, config.max_history)
+    partitions = PrefixSegmentations(values[:capacity], config, penalties=penalties)
+    shared = SharedIntervals(values, capacity)
+    offset = 0
     trends, diagnostics = [], []
     for completed, end in enumerate(range(config.min_segment_length, n + 1), 1):
-        offset = max(0, end - config.max_history)
-        if not offset:
-            provenance = partitions.candidate_provenance(end)
-            costs = initial_costs
-        else:
-            # Exact bounded-window fallback. Short configured lookbacks remain
-            # inexpensive on large datasets; no endpoints are subsampled.
-            costs = LinearCosts(values[offset:end])
-            provenance = candidate_provenance(costs, volatility(values[offset:end]), config, penalties=penalties)
+        next_offset = window_start(end, config.max_history)
+        if next_offset != offset:
+            offset = next_offset
+            # Release the old DP before allocating the next window's table.
+            del partitions
+            partitions = PrefixSegmentations(values[offset:offset + capacity], config, penalties=penalties)
             shared.discard_before(offset)
+        # On a shift, this first query also rebuilds the H overlapping bars.
+        # They supply context only: previous records are never emitted again.
+        provenance = partitions.candidate_provenance(end - offset)
         snapshot = _describe(times[offset:end], values[offset:end], offset, config,
-                             costs=costs, provenance=provenance, shared=shared)
+                             costs=partitions.costs, provenance=provenance, shared=shared)
         trends.extend(snapshot.trends)
         diagnostics.extend(snapshot.diagnostics)
         if progress is not None:

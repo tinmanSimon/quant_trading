@@ -189,7 +189,7 @@ STREAMLIT_INTERACTIONS = r"""
             ?.querySelector('[role="combobox"]')?.value;
         await choose("Available chart logic", "Trend analysis");
         button("Add logic").click();
-        await until(() => document.querySelector('input[aria-label="Maximum lookback per endpoint (bars)"]')?.value === "8",
+        await until(() => document.querySelector('input[aria-label="Window advance and overlap (bars)"]')?.value === "8",
                     "saved configuration did not load");
         check(!selectControl("Slope filter")
             && !document.querySelector('input[aria-label="Redundancy tolerance (%)"]'),
@@ -290,7 +290,7 @@ STREAMLIT_INTERACTIONS = r"""
                   "changing a slope filter reset local zoom");
             verify();
         }
-        const lookbackControl = () => document.querySelector('input[aria-label="Maximum lookback per endpoint (bars)"]')
+        const lookbackControl = () => document.querySelector('input[aria-label="Window advance and overlap (bars)"]')
             ?.closest('[data-testid="stNumberInput"]');
         await nativeClick(lookbackControl().querySelector('button[data-testid="stNumberInputStepUp"]'));
         await until(() => document.body.textContent.includes("Unapplied changes"),
@@ -333,7 +333,7 @@ STREAMLIT_INTERACTIONS = r"""
         const originalIds = ids(visibleTraces());
         button("Remove").click();
         await until(() => document.body.textContent.includes("Unapplied changes")
-            && !document.querySelector('input[aria-label="Maximum lookback per endpoint (bars)"]'),
+            && !document.querySelector('input[aria-label="Window advance and overlap (bars)"]'),
             "Remove did not update the draft selection");
         check(ids(visibleTraces()) === originalIds, "Remove changed the applied chart before Apply");
         button("Apply").click();
@@ -341,7 +341,7 @@ STREAMLIT_INTERACTIONS = r"""
         check(chart.layout.xaxis.range.every((value, index) => close(value, trendRange[index])),
               "removal reset local zoom");
         button("Add logic").click();
-        await until(() => document.querySelector('input[aria-label="Maximum lookback per endpoint (bars)"]')?.value === "8"
+        await until(() => document.querySelector('input[aria-label="Window advance and overlap (bars)"]')?.value === "8"
             && !selectControl("Slope filter")
             && !document.querySelector('[data-test-script-state="running"]'),
             "adding another trend instance did not reuse saved defaults without result display controls");

@@ -24,7 +24,7 @@ _DISPLAY_FIELDS = (*_REDUNDANCY_FIELDS, "show_redundant", "show_all_lambdas",
                    "selected_lambdas", "include_without_lambda", "slope_mode",
                    "slope_min", "slope_max")
 _TITLES = {
-    "max_history": "Maximum lookback per endpoint (bars)",
+    "max_history": "Window advance and overlap (bars)",
     "min_segment_length": "Minimum segment length (bars)",
     "penalty_multiplier": "Starting λ",
     "penalty_grid_step": "Penalty grid step",
@@ -61,8 +61,14 @@ def _properties():
                "title": _TITLES[name], "default": value}
         for name, value in _DEFAULTS.items()
     }
-    for name in ("max_history", "min_segment_length", "min_tail_length"):
+    for name in ("min_segment_length", "min_tail_length"):
         properties[name].update(minimum=8, maximum=2000)
+    properties["max_history"].update(minimum=8, maximum=100_000)
+    properties["max_history"]["description"] = (
+        "Analysis windows hold up to twice this many bars and advance by this many bars. "
+        "The overlapping half is rebuilt once per shift; each endpoint uses only its "
+        "window's data through that bar. This does not limit total historical coverage."
+    )
     properties["penalty_multiplier"]["exclusiveMinimum"] = 0
     properties["penalty_grid_step"].update(minimum=0.25, maximum=4)
     properties["penalty_grid_levels"].update(minimum=1, maximum=256)

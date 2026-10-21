@@ -23,7 +23,7 @@ def prefix_robust_slopes(values: np.ndarray) -> np.ndarray:
     All pair slopes are ranked once. As each new observation arrives, its
     pair ranks are added to a two-level histogram. Rank selection gives the
     exact median (averaging both middle values for an even number of pairs).
-    This is O(n² log n) for sorting, with O(n²) memory, bounded at 2,000 bars.
+    This is O(n² log n) for sorting, with O(n²) memory, bounded by the window.
     """
     n = len(values)
     result = np.zeros(n + 1)

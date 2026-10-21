@@ -8,12 +8,13 @@ from typing import Any, Mapping
 import polars as pl
 
 
-ALGORITHM_VERSION = "4.0.0"
+ALGORITHM_VERSION = "5.0.0"
 Timestamp = datetime | date
 
 
 @dataclass(frozen=True)
 class TrendConfig:
+    # Window advance and overlap; each analysis window holds up to twice this.
     max_history: int = 2000
     min_segment_length: int = 8
     penalty_multiplier: float = 1.0
@@ -57,8 +58,8 @@ class TrendConfig:
         for name in ("max_history", "min_segment_length", "min_tail_length", "redundancy_min_bars", "penalty_grid_levels"):
             if not isinstance(getattr(self, name), int):
                 raise ValueError(f"{name} must be an integer")
-        if not 8 <= self.min_segment_length <= self.max_history <= 2000:
-            raise ValueError("Require 8 <= min_segment_length <= max_history <= 2000")
+        if not 8 <= self.min_segment_length <= self.max_history <= 100_000:
+            raise ValueError("Require 8 <= min_segment_length <= max_history <= 100000")
         if not 8 <= self.min_tail_length <= self.max_history:
             raise ValueError("Require 8 <= min_tail_length <= max_history")
         if self.penalty_multiplier <= 0:
