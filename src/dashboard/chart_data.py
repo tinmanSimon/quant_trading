@@ -84,7 +84,7 @@ class ChartSeries:
     """
 
     def __init__(self, frame: pl.DataFrame, *, timeframe: str,
-                 session_timezone: str = "America/New_York", omitted_timestamps=()):
+                 session_timezone: str = "America/New_York", omitted_timestamps=(), support_frame=None):
         if frame.is_empty():
             raise ValueError("A chart requires at least one bar.")
         required = {"timestamp", "open", "high", "low", "close", "volume"}
@@ -100,6 +100,8 @@ class ChartSeries:
             raise ValueError("Chart bars must have unique timestamps.")
         if "symbol" in self._frame.columns and self._frame["symbol"].n_unique() != 1:
             raise ValueError("A chart series must contain a single symbol.")
+        # Earlier verified bars initialize indicators but never become chart rows.
+        self._support_frame = support_frame.clone() if support_frame is not None else None
         self.timeframe = timeframe
         self.session_timezone = session_timezone
         zone = ZoneInfo(session_timezone)
@@ -134,12 +136,18 @@ class ChartSeries:
         # Include the retained Python indices/timestamps in the server LRU budget.
         self.estimated_size = (self._frame.estimated_size() + 64 * self.total_count
                                + 80 * (len(self._days.first) + len(self._runs.first))
-                               + 64 * len(self.omitted_timestamps))
+                               + 64 * len(self.omitted_timestamps)
+                               + (self._support_frame.estimated_size() if self._support_frame is not None else 0))
 
     @property
     def frame(self) -> pl.DataFrame:
         """Return a clone so callers cannot mutate the cached snapshot in place."""
         return self._frame.clone()
+
+    @property
+    def support_frame(self) -> pl.DataFrame | None:
+        """Earlier source bars supplied by the data layer, separate from the view."""
+        return self._support_frame.clone() if self._support_frame is not None else None
 
     def _weekly_spans(self, weeks: int) -> _Spans:
         # Python ordinals start on a Monday, so this anchors every group to a

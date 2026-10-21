@@ -478,15 +478,26 @@ def render_logic_results(run, registry=None, memory=None):
         with st.expander(f"{label} · results ({index + 1})", expanded=True):
             for message in result.messages:
                 st.caption(message)
-            for table in result.tables:
+            for table_index, table in enumerate(result.tables):
                 st.markdown(f"**{table['name']}**")
                 if table["rows"]:
+                    rows = table["rows"]
+                    if len(rows) > 500:
+                        pages = (len(rows) + 499) // 500
+                        kwargs = dict(min_value=1, max_value=pages, value=pages, step=1,
+                                      key=f"chart-result-page-{spec.instance_id}-{table_index}")
+                        label = f"{table['name']} page"
+                        page = (memory.widget(st.number_input, label, **kwargs) if memory else
+                                st.number_input(label, **kwargs))
+                        first = (page - 1) * 500
+                        st.caption(f"Rows {first + 1:,}–{min(first + 500, len(rows)):,} of {len(rows):,}.")
+                        rows = rows[first:first + 500]
                     try:
-                        frame = pl.DataFrame(table["rows"], infer_schema_length=None, strict=False)
+                        frame = pl.DataFrame(rows, infer_schema_length=None, strict=False)
                         st.dataframe(frame, hide_index=True, width="stretch")
                     except (pl.exceptions.PolarsError, TypeError, ValueError) as error:
                         st.error(f"Could not display the {table['name']!r} table: {error}")
-                        st.json(table["rows"])
+                        st.json(rows)
                 else:
                     st.caption("No rows.")
             with st.expander("Applied settings"):

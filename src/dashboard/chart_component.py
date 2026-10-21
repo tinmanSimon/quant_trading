@@ -42,7 +42,7 @@ def render_price_chart(figure, *, key="market-price-chart"):
     """Mount a chart whose zoom/pan events stay entirely in the browser."""
     component = _renderer()
     component(data={"figure": json.loads(figure.to_json()), "config": CHART_CONFIG},
-              key=key, height=650, width="stretch")
+              key=key, height=figure.layout.height or 650, width="stretch")
 
 
 def viewport_request(value, chart_id):
@@ -116,5 +116,6 @@ def render_series_chart(series, *, chart_id, timeframe, timezone, title="", tren
                              title=title, request=request, trends=trends, overlays=overlays,
                              overlay_revision=overlay_revision)
     component = _renderer()
-    component(data=payload, key=key, height=820, width="stretch", default={"viewport": None},
+    component(data=payload, key=key, height=payload["figure"]["layout"]["height"] + 170,
+              width="stretch", default={"viewport": None},
               on_viewport_change=lambda: None)

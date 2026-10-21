@@ -307,11 +307,85 @@ session mode, regular hours follow the XNYS exchange calendar, including holiday
 DST and early closes. Extended hours use the explicit US-equity convention of
 04:00–20:00 New York time (17:00 close on early-close days). The display timezone
 never changes the reference. A session needs its actual opening bar in the
-selected data; missing opens are reported and skipped, never replaced with the
-first visible bar. Expand the selected date range if needed. Daily bars use the
+selected data or the available earlier history from the same source; missing
+opens are reported and skipped, never replaced with the first visible bar. Daily bars use the
 provider's daily open; extended-hours opens cannot be inferred from daily bars.
 Weekly/monthly bars support first-bar and each-bar references. Session outputs
 do not connect overnight.
+
+### Technical indicators
+
+Market data includes these independently configurable chart logics:
+
+| Logic | Calculation settings | Outputs |
+| --- | --- | --- |
+| Moving average | SMA/EMA/WMA, period, price source | Average |
+| RSI | Period, price source | RSI |
+| MACD | Fast, slow and signal periods, price source | MACD, signal, histogram |
+| ATR | Period, normalized percentage option | ATR or normalized ATR |
+| Bollinger bands | Period, upper/lower deviations, price source | Middle, upper and lower bands |
+| ADX | Period | ADX, +DI, −DI |
+| Stochastic | Lookback, %K smoothing, %D period | Slow %K and %D |
+| OBV | Price source | Cumulative signed volume |
+
+Use **Add logic** and **Apply** as above. Multiple instances can compare, for
+example, RSI(7) with RSI(14), or SMA(20) with EMA(50). Every indicator has its own
+panel below price and volume, including moving averages and Bollinger bands.
+Horizontal pan and zoom stay synchronized; each panel has its own vertical
+scale. Colors, line widths, individual series visibility, and supported reference
+levels update through **Chart display and filters** without recalculation.
+MACD also has separate positive/negative histogram colors.
+
+Calculations use completed original bars and available earlier bars from the
+same selected data source/revision for initialization. Earlier bars do not
+appear in the selected chart or result tables. Missing earlier history is not
+downloaded automatically: values remain null until enough bars are available.
+The result metadata records the actual history start, initialization count,
+parameters, units, warmup, and algorithm/backend versions. Recursive indicators
+depend on their starting history; adding earlier history can change their
+values. They do not reset at trend analysis's moving-window boundaries.
+
+Full-resolution tables are retained in saved results and shown in pages of up
+to 500 rows, initially on the latest page. Chart transport uses bounded samples;
+these samples never replace the calculation or table values. Large datasets
+with many indicators still require time and memory to prepare and save tables.
+
+Research uses the same standalone `market_indicators` package, with no dashboard
+or network dependency. Install the normal project requirements, which pin
+`TA-Lib==0.8.2`, then pass one ordered Polars series:
+
+```python
+from market_indicators import moving_average, rsi, macd, atr
+
+# bars: Polars DataFrame with unique, increasing Date/Datetime timestamps.
+# Supply earlier history before calculating, then slice the desired research range.
+rsi_result = rsi(bars, period=14, price_col="close")
+ema_result = moving_average(bars, kind="ema", period=50)
+macd_result = macd(bars, fast=12, slow=26, signal=9)
+atr_result = atr(bars, period=14, normalized=True)
+
+values = rsi_result.frame  # source_index, timestamp, value; warmup stays null
+settings_and_history = rsi_result.metadata
+features = bars.join(
+    values.select("timestamp", "value").rename({"value": "rsi_14"}),
+    on="timestamp", how="left",
+)
+```
+
+The package also exports `bollinger_bands`, `adx`, `stochastic`, and `obv`.
+Results preserve input row alignment. Research callers provide completed bars
+and a consistent price basis; optional instrument/timeframe identity columns
+must each contain one non-null value. Required numeric inputs must be finite
+and non-null. No forward filling, resampling, or future data is used.
+
+Conventions are explicit: RSI/ATR/ADX use Wilder smoothing; EMA uses an SMA
+seed; Bollinger bands use an SMA center and population standard deviation;
+stochastic uses simple smoothing; OBV starts with the first bar's volume.
+MACD follows TA-Lib's aligned EMA seeds and common signal warmup, so its initial
+values need not equal subtraction of two independently seeded EMA calls.
+Flat-price RSI is zero. Normalized ATR is `100 * ATR / close`, with zero for a
+zero close after warmup. Full per-output warmup and initialization details are
+available in `IndicatorResult.metadata` and the public function docstrings.
 
 ### Adding a chart logic module
 
@@ -401,6 +475,7 @@ Supported overlay primitives are:
 | --- | --- | --- |
 | `line` | ordered `x`, matching `y` | Curves or horizontal segments |
 | `markers` | ordered `x`, matching `y` | Events or isolated levels |
+| `bar` | ordered `x`, matching `y` | Histograms |
 | `band` | ordered `x`, `lower`, `upper` | Shaded envelopes |
 | `log_line` | `start_index`, `end_index`, `slope`, `intercept` | Exact exponential fitted curves |
 
@@ -413,6 +488,15 @@ boundaries must share nulls). The renderer clips and bounds array samples for
 transport without changing cached calculations. Keep descriptor counts bounded
 by combining related series with gaps rather than creating one trace per bar.
 `log_line` evaluates `exp(intercept + slope * (x - start_index))`.
+
+To place primitives in a synchronized panel below volume, add the same
+`"panel": {"id": "momentum", "title": "Momentum", "range": [0, 100]}`
+declaration to each of them. The optional `range` fixes that panel's vertical
+scale; omit it to autoscale from visible values. Panel IDs are local to each
+logic instance, and all primitives sharing one ID must declare identical panel
+settings. Panels appear in first-use order. Primitives without `panel` remain
+on the price chart. Hiding every primitive in a panel removes that panel while
+preserving horizontal navigation.
 
 Bump `version` whenever calculation or parameter semantics change, and
 `result_version` when the saved archive representation changes. All saved
@@ -908,7 +992,9 @@ To also test chart gestures, scaling and resize in an installed Chrome/Chromium
 browser (synthetic data only; no vendor requests):
 
 ```bash
-./venv/bin/python -m pytest tests/test_dashboard_chart_browser.py tests/test_dashboard_chart_streamlit.py --run-browser
+./venv/bin/python -m pytest tests/test_dashboard_chart_browser.py \
+  tests/test_dashboard_logic_overlay_browser.py tests/test_dashboard_indicator_panels.py \
+  tests/test_dashboard_chart_streamlit.py --run-browser
 ```
 
 Tests use per-test temporary directories and deterministic fixtures under

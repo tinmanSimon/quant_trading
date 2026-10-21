@@ -153,14 +153,28 @@ STREAMLIT_INTERACTIONS = r"""
             return [...document.querySelectorAll('[data-testid="stSelectbox"]')]
                 .find(item => item.textContent.includes(title));
         }
+        async function nativeKey(key, virtualKey) {
+            window.__testKey = {key, code: key, windowsVirtualKeyCode: virtualKey};
+            await until(() => !window.__testKey, "native key was not delivered: " + key);
+            await new Promise(requestAnimationFrame);
+        }
         async function choose(title, label) {
             const control = selectControl(title);
             check(control, "missing selectbox: " + title);
             await nativeClick(control.querySelector('button[aria-haspopup="listbox"]'));
             await until(() => [...document.querySelectorAll('[role="option"]')]
                 .some(item => item.textContent.trim() === label), "options did not open: " + title);
-            await nativeClick([...document.querySelectorAll('[role="option"]')]
-                .find(item => item.textContent.trim() === label));
+            const option = [...document.querySelectorAll('[role="option"]')]
+                .find(item => item.textContent.trim() === label);
+            const position = Number(option.getAttribute("aria-posinset"));
+            check(Number.isInteger(position) && position > 0, "option position missing: " + label);
+            // Native keyboard navigation follows the virtualized list without
+            // relying on coordinates that change while its rows are scrolling.
+            await nativeKey("Home", 36);
+            for (let index = 1; index < position; index++) await nativeKey("ArrowDown", 40);
+            await until(() => document.querySelector('[role="option"][data-focused="true"]')?.textContent.trim() === label,
+                "requested option did not receive keyboard focus: " + title);
+            await nativeKey("Enter", 13);
             await until(() => !document.querySelector('[role="listbox"]')
                 && !document.querySelector('[data-test-script-state="running"]'), "selection did not settle: " + title);
         }
@@ -219,10 +233,20 @@ STREAMLIT_INTERACTIONS = r"""
               "historical fit extends past its observed data");
         check(new Set(visibleTraces().map(trace => trace.x.at(-1))).size > 1,
               "historical chart still contains only one final endpoint");
-        const intervals = visibleTraces().map(trace => [trace.x[0], trace.x.at(-1)]);
-        check(intervals.some((interval, index) => intervals.slice(index + 1).some(other =>
-            Math.min(interval[1], other[1]) > Math.max(interval[0], other[0]))),
-            "nearby-boundary grouping still suppressed all overlapping intervals");
+        const intervalSignature = () => JSON.stringify(visibleTraces().map(trace =>
+            [trace.meta.trend_id, trace.x[0], trace.x.at(-1)]));
+        const defaultIntervals = intervalSignature();
+        // H=8 block windows can produce disjoint default representatives.
+        // Showing the complete archive must still retain overlapping fits.
+        await setCheckbox("Show redundant trends", true);
+        await until(() => {
+            const intervals = visibleTraces().map(trace => [trace.x[0], trace.x.at(-1)]);
+            return intervals.some((interval, index) => intervals.slice(index + 1).some(other =>
+                Math.min(interval[1], other[1]) > Math.max(interval[0], other[0])));
+        }, "showing redundant trends suppressed overlapping intervals");
+        await setCheckbox("Show redundant trends", false);
+        await until(() => intervalSignature() === defaultIntervals,
+            "hiding redundant trends did not restore the default intervals");
         check(visibleTraces().every(trace => trace.meta.lambda_values.length > 0
             && trace.meta.primary_lambda === Math.min(...trace.meta.lambda_values)),
             "historical overlays lost segmentation lambda provenance");

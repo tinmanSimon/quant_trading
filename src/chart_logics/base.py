@@ -85,7 +85,7 @@ class LogicResult:
                     or not isinstance(table.get("rows"), list)
                     or not all(isinstance(row, dict) for row in table["rows"])):
                 raise ValueError("Result tables require a name and a list of row objects.")
-        ids = set()
+        ids, panels = set(), {}
         for overlay in self.overlays:
             if not isinstance(overlay, dict):
                 raise ValueError("An overlay must be an object.")
@@ -93,6 +93,12 @@ class LogicResult:
             if not isinstance(identifier, str) or not identifier or identifier in ids:
                 raise ValueError("Overlay IDs must be nonempty and unique within a logic.")
             ids.add(identifier)
+            panel = overlay.get("panel")
+            if panel is not None:
+                validate_panel(panel)
+                if panel["id"] in panels and panels[panel["id"]] != panel:
+                    raise ValueError("Primitives in the same panel must use the same panel declaration.")
+                panels[panel["id"]] = panel
             kind = overlay.get("type")
             if kind == "log_line":
                 values = [overlay.get(key) for key in ("start_index", "end_index", "slope", "intercept")]
@@ -105,7 +111,7 @@ class LogicResult:
                         raise ValueError("Log-line fit produces nonfinite prices.")
                 except OverflowError as error:
                     raise ValueError("Log-line fit produces nonfinite prices.") from error
-            elif kind in ("line", "band", "markers"):
+            elif kind in ("line", "band", "markers", "bar"):
                 xs = overlay.get("x")
                 if not isinstance(xs, list) or not all(_finite(value) for value in xs):
                     raise ValueError("Overlay x coordinates must be finite source-bar indices.")
@@ -128,6 +134,20 @@ class LogicResult:
 
 def _finite(value):
     return type(value) in (int, float) and math.isfinite(value)
+
+
+def validate_panel(panel):
+    """Validate an optional independent-axis panel shared by several primitives."""
+    if (not isinstance(panel, dict) or set(panel) - {"id", "title", "range"}
+            or any(not isinstance(panel.get(key), str) or not panel[key].strip()
+                   for key in ("id", "title"))):
+        raise ValueError("Indicator panels require nonempty id and title strings.")
+    limits = panel.get("range")
+    if "range" in panel and (not isinstance(limits, list) or len(limits) != 2
+                            or not all(_finite(value) for value in limits)
+                            or limits[0] >= limits[1]):
+        raise ValueError("Indicator panel ranges must contain two ordered finite values.")
+    return panel
 
 
 class BaseChartLogic(ABC):

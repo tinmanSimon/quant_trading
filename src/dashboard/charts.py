@@ -10,13 +10,14 @@ from bisect import bisect_left
 from collections import defaultdict
 from collections.abc import Iterable
 from datetime import UTC, datetime
+from html import escape
 from zoneinfo import ZoneInfo
 
 import polars as pl
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from .chart_overlays import overlay_traces, window_overlays
+from .chart_overlays import overlay_panels, overlay_traces, window_overlays
 
 
 CHART_CONFIG = {
@@ -156,6 +157,48 @@ def line_chart(
     return figure
 
 
+def _configure_indicator_panels(figure, panels):
+    """Save structural layout separately so display changes can survive old viewports."""
+    rows = len(panels) + 2
+    title = figure.layout.xaxis2.title.to_plotly_json()
+    structure = {"height": 650 + 190 * len(panels), "axes": {}, "panels": [], "annotations": []}
+    if panels:
+        heights = [360, 110] + [172] * len(panels)
+        total = sum(heights) + 18 * (rows - 1)
+        top = 1.0
+        domains = []
+        for height in heights:
+            domains.append([max(0, top - height / total), top])
+            top -= (height + 18) / total
+    else:
+        domains = [list(figure.layout.yaxis.domain), list(figure.layout.yaxis2.domain)]
+    for index, domain in enumerate(domains):
+        suffix = str(index + 1) if index else ""
+        bottom = index == rows - 1
+        x = {"domain": [0, 1], "anchor": "y" + suffix, "matches": "x" if index else None,
+             "showticklabels": bottom, "title": title if bottom else {"text": ""},
+             "rangeslider": {"visible": False}}
+        y = {"domain": domain, "anchor": "x" + suffix}
+        if index >= 2:
+            panel = panels[index - 2]
+            x.update(type="linear", fixedrange=False, automargin=True,
+                     minallowed=figure.layout.xaxis.minallowed, maxallowed=figure.layout.xaxis.maxallowed)
+            y.update(automargin=True, fixedrange=True, nticks=4, ticks="outside", autorange=False,
+                     range=panel.get("range", [0, 1]), zeroline=True)
+            structure["panels"].append({**panel, "xaxis": "xaxis" + suffix, "yaxis": "yaxis" + suffix})
+            structure["annotations"].append({"name": "indicator-panel:" + panel["id"],
+                "xref": "paper", "yref": "paper", "x": 0, "y": domain[1],
+                "text": escape(panel["title"]), "showarrow": False,
+                "xanchor": "left", "yanchor": "bottom", "font": {"size": 12}})
+        structure["axes"]["xaxis" + suffix] = x
+        structure["axes"]["yaxis" + suffix] = y
+    figure.update_layout(**structure["axes"], height=structure["height"], barmode="overlay")
+    figure.update_xaxes(range=figure.layout.xaxis.range, autorange=False)
+    for annotation in structure["annotations"]:
+        figure.add_annotation(**annotation)
+    figure.layout.meta = {**figure.layout.meta, "panel_layout": structure}
+
+
 def window_price_chart(window, *, timeframe, timezone="America/New_York", title="",
                        gap_markers=(), trend_overlays=(), overlays=()):
     """Build only the bounded display window, using global source-bar positions."""
@@ -190,5 +233,6 @@ def window_price_chart(window, *, timeframe, timezone="America/New_York", title=
                               font={"color": "#b87913", "size": 10})
     primitives = [{"type": "log_line", "id": f"legacy-trend:{index}:{item['trend_id']}", **item}
                   for index, item in enumerate(trend_overlays)] + list(overlays)
+    _configure_indicator_panels(figure, overlay_panels(primitives))
     figure.add_traces(overlay_traces(window_overlays(primitives, window.loaded_range), window.loaded_range))
     return figure

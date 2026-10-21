@@ -2,6 +2,7 @@
 
 from collections import OrderedDict
 from collections.abc import Iterable
+from dataclasses import replace
 from datetime import datetime
 from hashlib import sha256
 
@@ -44,15 +45,22 @@ class BoundedChartCache:
         self, pipeline: DataPipeline, query: DataQuery, *, dataset_id: str | None = None,
         timeframe: str, session_timezone: str = "America/New_York",
         omitted_timestamps: Iterable[datetime] = (),
+        include_support: bool = False,
     ) -> ChartSeries | None:
         """Return a chart series only after verifying its current source bytes."""
         try:
-            frame = (pipeline.read(query) if dataset_id is None
+            read_query = replace(query, start=None) if include_support else query
+            frame = (pipeline.read(read_query) if dataset_id is None
                      else pipeline.read_dataset(dataset_id))
             # Explicit dataset reads contain the entire revision. Use microsecond
             # comparisons to preserve exact bounds against millisecond storage.
             timestamp = pl.col("timestamp").cast(pl.Datetime("us", "UTC"))
+            support = None
             if query.start is not None:
+                if include_support:
+                    earlier = frame.filter(timestamp < pl.lit(query.start, dtype=pl.Datetime("us", "UTC")))
+                    if not earlier.is_empty():
+                        support = earlier
                 frame = frame.filter(timestamp >= pl.lit(query.start, dtype=pl.Datetime("us", "UTC")))
             if query.end is not None:
                 frame = frame.filter(timestamp < pl.lit(query.end, dtype=pl.Datetime("us", "UTC")))
@@ -61,14 +69,16 @@ class BoundedChartCache:
                 return None
 
             omissions = tuple(sorted(set(omitted_timestamps)))
-            digest = sha256(frame.write_ipc(None).getvalue()).digest()
+            digest = sha256(frame.write_ipc(None).getvalue())
+            if support is not None:
+                digest.update(support.write_ipc(None).getvalue())
             key = (str(pipeline.store.data_dir), query, dataset_id, timeframe,
-                   session_timezone, omissions, digest)
+                   session_timezone, omissions, include_support, digest.digest())
             if key in self._entries:
                 series = self._entries.pop(key)
             else:
                 series = ChartSeries(frame, timeframe=timeframe, session_timezone=session_timezone,
-                                     omitted_timestamps=omissions)
+                                     omitted_timestamps=omissions, support_frame=support)
             if series.estimated_size <= self.max_bytes and self.max_entries:
                 self._entries[key] = series
             # Recount sizes so lazily built display indexes, if any, also count

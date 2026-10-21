@@ -195,7 +195,7 @@ def _render_data_page(research: Research, memory):
         st.session_state["market-chart-cache"] = cache
     session_timezone = "America/New_York"
     series = cache.load(research.pipeline, query, dataset_id=dataset_id, timeframe=identity[1],
-                        session_timezone=session_timezone, omitted_timestamps=omitted)
+                        session_timezone=session_timezone, omitted_timestamps=omitted, include_support=True)
     with memory.widget(st.expander, "Dataset metadata", key="browse-metadata-open"):
         st.dataframe(pl.DataFrame(_metadata_rows(selected)), hide_index=True)
     show_details = bool(omitted) and memory.widget(st.checkbox, "Show omission details", key="browse-omission-details")
@@ -219,7 +219,7 @@ def _render_data_page(research: Research, memory):
     logic_identity = (str(research.pipeline.store.data_dir), query, dataset_id,
                       tuple(item.to_json() for item in sorted(selected, key=lambda item: item.dataset_id)))
     context = LogicContext(frame=series.frame, timeframe=identity[1], identity=logic_identity,
-                           cutoff=cutoff, session_timezone=session_timezone)
+                           cutoff=cutoff, session_timezone=session_timezone, support_frame=series.support_frame)
     # A stable container prevents conditional controls from moving the chart's
     # Streamlit element path, unmounting it, and losing browser-local navigation.
     with st.container():

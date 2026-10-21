@@ -100,8 +100,17 @@ class LogicRegistry:
 
     def display_schema(self, name, version, result=None):
         try:
-            schema = (self.definition(name, version).display_schema if result is None else
-                      self.create(name, version).display_schema_for(deepcopy(result)))
+            if result is None:
+                schema = self.definition(name, version).display_schema
+            else:
+                logic = self.create(name, version)
+                method = logic.display_schema_for
+                if getattr(method, "__func__", None) is BaseChartLogic.display_schema_for:
+                    # Static controls never inspect results. Avoid copying a
+                    # potentially large archive merely to read their schema.
+                    schema = logic.display_schema
+                else:
+                    schema = method(deepcopy(result))
             return self._check_display_schema(schema)
         except Exception as error:
             raise ValueError(f"Chart logic {name!r} has invalid display controls: {error}") from error

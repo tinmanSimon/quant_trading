@@ -70,6 +70,26 @@ def test_independent_cache_duplicate_instances_and_removal(runner):
     assert runner.apply([], context()).overlays == []
 
 
+def test_instance_panel_ids_are_namespaced_without_changing_archived_descriptors():
+    class PanelLogic(CountingLogic):
+        name = "panel"
+
+        def calculate(self, context, config, progress=None):
+            result = super().calculate(context, config, progress)
+            result.overlays[0]["panel"] = {"id": "indicator", "title": "Example"}
+            return result
+
+    registry = LogicRegistry()
+    registry.register_class(PanelLogic)
+    runner = LogicRunner(registry)
+    run = runner.apply([LogicSpec(name, "panel", "1", {}) for name in ("first", "second")], context())
+    assert not run.errors
+    assert [item["panel"]["id"] for item in run.overlays] == ["first:indicator", "second:indicator"]
+    assert run.results["first"].overlays[0]["panel"]["id"] == "indicator"
+    restored = runner.restore(runner.snapshot(run), context())
+    assert restored.overlays == run.overlays
+
+
 def test_validation_is_atomic_calculation_errors_are_isolated(runner):
     with pytest.raises(ValueError, match="offset"):
         runner.apply([spec(), spec("bad", -1)], context())

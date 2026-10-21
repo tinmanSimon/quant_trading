@@ -8,7 +8,7 @@ export default function render({parentElement, data, setStateValue}) {
     const chart = document.createElement("div");
     chart.classList.add("quant-bar-chart");
     chart.style.width = "100%";
-    chart.style.height = "650px";
+    chart.style.height = (data.figure.layout.height || 650) + "px";
     parentElement.appendChild(chart);
     // Use the normal arrow over idle plot space; keep drag/control cursors.
     const cursorStyle = document.createElement("style");
@@ -40,6 +40,7 @@ export default function render({parentElement, data, setStateValue}) {
             ...trend, type: "log_line", id: `legacy-trend:${index}:${trend.trend_id}`}));
     }
     let overlays = readOverlays(data);
+    let panelLayout = data.figure.layout.meta?.panel_layout;
     let overlayCoverage = data.overlay_coverage || data.loaded_range;
     let sampledOverlayView = "";
     let resolutionBudget = data.width_budget || Math.max(200, Math.min(1000, chart.clientWidth || 900));
@@ -47,6 +48,10 @@ export default function render({parentElement, data, setStateValue}) {
     let pending = false, disposed = false, initialized = false;
     let work = Promise.resolve(), fitQueued = false, needsResize = false;
     let observer, timer, controls, status, canvas, startControl, endControl;
+
+    function xAxes() {
+        return Object.keys(payload.figure.layout).filter(key => /^xaxis\d*$/.test(key));
+    }
 
     function boundedRange(requested) {
         if (!requested || !requested.every(Number.isFinite)) return fullRange.slice();
@@ -94,12 +99,16 @@ export default function render({parentElement, data, setStateValue}) {
     function primitiveTraces(descriptor, limits) {
         const kind = descriptor.type;
         const meta = {chart_overlay: true, overlay_id: descriptor.id, primitive: kind};
+        const panel = panelLayout?.panels.find(item => item.id === descriptor.panel?.id);
+        if (panel) meta.panel_id = panel.id;
         if (descriptor.trend_id) Object.assign(meta, {
             trend_overlay: true, trend_id: descriptor.trend_id,
             lambda_values: descriptor.lambda_values, lambda_levels: descriptor.lambda_levels,
             primary_lambda: descriptor.primary_lambda, origin: descriptor.origin});
         const common = {type: "scatter", mode: "lines", name: descriptor.name || descriptor.id,
-            line: descriptor.line, hovertemplate: descriptor.hovertemplate, xaxis: "x", yaxis: "y",
+            line: descriptor.line, hovertemplate: descriptor.hovertemplate,
+            xaxis: panel ? panel.xaxis.replace("axis", "") : "x",
+            yaxis: panel ? panel.yaxis.replace("axis", "") : "y",
             showlegend: false, connectgaps: false, meta};
         if (kind === "log_line") {
             const first = Math.max(descriptor.start_index, limits[0]);
@@ -109,10 +118,18 @@ export default function render({parentElement, data, setStateValue}) {
             const x = Array.from({length: size}, (_, index) => first + (last - first) * index / (size - 1));
             return [{...common, x, y: x.map(value => trendPrice(descriptor, value))}];
         }
-        if (kind === "markers") {
+        if (kind === "markers" || kind === "bar") {
             const first = boundIndex(descriptor.x, limits[0]), end = boundIndex(descriptor.x, limits[1], true);
-            return first === end ? [] : [{...common, mode: "markers", marker: descriptor.marker,
-                x: descriptor.x.slice(first, end), y: descriptor.y.slice(first, end)}];
+            if (first === end) return [];
+            const trace = {...common, marker: descriptor.marker,
+                x: descriptor.x.slice(first, end), y: descriptor.y.slice(first, end)};
+            if (kind === "bar") {
+                delete trace.line;
+                delete trace.mode;
+                delete trace.connectgaps;
+                return [{...trace, type: "bar", width: 0.65}];
+            }
+            return [{...trace, mode: "markers"}];
         }
         const keys = kind === "band" ? ["lower", "upper"] : ["y"];
         const {x, values} = clippedPoints(descriptor, limits, keys);
@@ -139,9 +156,29 @@ export default function render({parentElement, data, setStateValue}) {
         // Rebuild against the window actually accepted without restoring old bars.
         const traces = base.figure.data.filter(trace => !trace.meta?.chart_overlay && !trace.meta?.trend_overlay);
         for (const descriptor of overlays) traces.push(...primitiveTraces(descriptor, base.loaded_range));
-        const layout = {...base.figure.layout,
-            xaxis: {...base.figure.layout.xaxis, range: range.slice(), autorange: false},
-            xaxis2: {...base.figure.layout.xaxis2, range: range.slice(), autorange: false}};
+        for (const panel of panelLayout?.panels || []) {
+            if (!traces.some(trace => trace.meta?.panel_id === panel.id)) traces.push({
+                type: "scatter", mode: "lines", x: [base.loaded_range[0]], y: [null],
+                xaxis: panel.xaxis.replace("axis", ""), yaxis: panel.yaxis.replace("axis", ""),
+                showlegend: false, hoverinfo: "skip",
+                meta: {chart_overlay: true, panel_id: panel.id, panel_placeholder: true}});
+        }
+        const layout = {...base.figure.layout};
+        if (panelLayout) {
+            // Panel layout belongs to the display revision, not the candle
+            // response: an older navigation reply must not restore hidden rows.
+            for (const key of Object.keys(layout))
+                if (/^[xy]axis\d+$/.test(key) && Number(key.match(/\d+$/)[0]) > 2) delete layout[key];
+            for (const [key, axis] of Object.entries(panelLayout.axes))
+                layout[key] = {...layout[key], ...axis};
+            layout.annotations = (layout.annotations || [])
+                .filter(item => !item.name?.startsWith("indicator-panel:"))
+                .concat(panelLayout.annotations);
+            layout.height = panelLayout.height;
+            layout.meta = {...layout.meta, panel_layout: panelLayout};
+        }
+        for (const key of Object.keys(layout)) if (/^xaxis\d*$/.test(key))
+            layout[key] = {...layout[key], range: range.slice(), autorange: false};
         if (initialized && chart.layout) layout.dragmode = chart.layout.dragmode;
         return {...base, overlay_revision: overlayRevision, overlays, overlay_coverage: overlayCoverage,
             figure: {...base.figure, data: traces, layout}};
@@ -316,6 +353,8 @@ export default function render({parentElement, data, setStateValue}) {
             high = Math.max(high, candles.high[index]);
             volume = Math.max(volume, volumes[index]);
         }
+        const panelExtents = new Map((panelLayout?.panels || []).map(panel => [panel.id,
+            {panel, low: Infinity, high: -Infinity}]));
         for (const descriptor of overlays) {
             let values;
             if (descriptor.type === "log_line") {
@@ -324,15 +363,25 @@ export default function render({parentElement, data, setStateValue}) {
                 if (last < first) continue;
                 // Analytic fits are monotone; endpoints include fractional edges.
                 values = [trendPrice(descriptor, first), trendPrice(descriptor, last)];
-            } else if (descriptor.type === "markers") {
+            } else if (descriptor.type === "markers" || descriptor.type === "bar") {
                 values = descriptor.y.slice(boundIndex(descriptor.x, range[0]), boundIndex(descriptor.x, range[1], true));
             } else {
                 const keys = descriptor.type === "band" ? ["lower", "upper"] : ["y"];
                 values = clippedPoints(descriptor, range, keys).values.flat();
             }
+            const extent = panelExtents.get(descriptor.panel?.id);
+            if (extent && descriptor.type === "bar" && values.some(Number.isFinite)) {
+                extent.low = Math.min(extent.low, 0);
+                extent.high = Math.max(extent.high, 0);
+            }
             for (const value of values) if (Number.isFinite(value)) {
-                low = Math.min(low, value);
-                high = Math.max(high, value);
+                if (extent) {
+                    extent.low = Math.min(extent.low, value);
+                    extent.high = Math.max(extent.high, value);
+                } else if (!descriptor.panel) {
+                    low = Math.min(low, value);
+                    high = Math.max(high, value);
+                }
             }
         }
         const tickCount = Math.max(2, Math.min(12, Math.floor(chart.clientWidth / 140)));
@@ -343,12 +392,16 @@ export default function render({parentElement, data, setStateValue}) {
             ticks.push(candles.x[item]);
             text.push(labels[item].replace("T", "<br>"));
         }
-        const update = {
-            "xaxis.range": range.slice(), "xaxis.autorange": false,
-            "xaxis2.range": range.slice(), "xaxis2.autorange": false,
-            "xaxis.tickvals": ticks, "xaxis.ticktext": text,
-            "xaxis2.tickvals": ticks, "xaxis2.ticktext": text,
-        };
+        const update = {};
+        for (const axis of xAxes()) Object.assign(update, {
+            [axis + ".range"]: range.slice(), [axis + ".autorange"]: false,
+            [axis + ".tickvals"]: ticks, [axis + ".ticktext"]: text});
+        for (const {panel, low: minimum, high: maximum} of panelExtents.values()) {
+            const padding = maximum > minimum ? (maximum - minimum) * 0.05 : (Math.abs(minimum) * 0.01 || 1);
+            update[panel.yaxis + ".range"] = panel.range || (Number.isFinite(minimum)
+                ? [minimum - padding, maximum + padding] : [0, 1]);
+            update[panel.yaxis + ".autorange"] = false;
+        }
         if (visible.length) {
             const padding = high > low ? (high - low) * 0.05 : (Math.abs(low) * 0.01 || 1);
             Object.assign(update, {"yaxis.range": [low - padding, high + padding], "yaxis.autorange": false,
@@ -386,7 +439,7 @@ export default function render({parentElement, data, setStateValue}) {
         // Our own fitting emits a relayout too; it is not a user gesture.
         if ("xaxis.tickvals" in event) return;
         if ("dragmode" in event) rememberView();
-        for (const axis of ["xaxis", "xaxis2"]) {
+        for (const axis of xAxes()) {
             if (event[axis + ".autorange"]) {
                 navigate(fullRange);
                 return;
@@ -412,6 +465,7 @@ export default function render({parentElement, data, setStateValue}) {
             if (newOverlays || (newWindow && (next.overlay_revision || 0) === overlayRevision)) {
                 overlayRevision = next.overlay_revision || 0;
                 overlays = readOverlays(next);
+                panelLayout = next.figure.layout.meta?.panel_layout;
                 overlayCoverage = next.overlay_coverage || next.loaded_range;
             }
             if (newWindow) {
@@ -427,6 +481,7 @@ export default function render({parentElement, data, setStateValue}) {
             // a new overlay may contain an old navigation response. Merge these
             // independent revisions without rolling either dimension backward.
             payload = withOverlays(payload);
+            chart.style.height = (payload.figure.layout.height || 650) + "px";
             sampledOverlayView = "";
             await window.Plotly.react(chart, payload.figure.data, payload.figure.layout,
                 {...payload.config, responsive: false, doubleClick: "reset"});

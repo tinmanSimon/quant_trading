@@ -14,12 +14,13 @@ from collections.abc import Mapping
 import math
 
 import plotly.graph_objects as go
+from chart_logics.base import validate_panel
 
 from .trend_overlays import MAX_TREND_POINTS, trend_descriptors
 
 
 MAX_OVERLAY_POINTS = 2048
-PRIMITIVE_TYPES = frozenset({"line", "band", "markers", "log_line"})
+PRIMITIVE_TYPES = frozenset({"line", "band", "markers", "bar", "log_line"})
 
 
 def _finite(value):
@@ -42,6 +43,8 @@ def validate_overlay(descriptor):
     if not isinstance(descriptor.get("id"), str) or not descriptor["id"].strip():
         raise ValueError("Chart primitives require a nonempty ID.")
     kind = descriptor["type"]
+    if descriptor.get("panel") is not None:
+        validate_panel(descriptor["panel"])
     if kind == "log_line":
         values = [descriptor.get(key) for key in ("start_index", "end_index", "slope", "intercept")]
         if (not all(_finite(value) for value in values)
@@ -76,10 +79,28 @@ def validate_overlay(descriptor):
         raise ValueError("Chart hover templates must be one string per primitive.")
     # Use Plotly's validators once here, rather than letting malformed plugin
     # styles break the shared browser chart after a successful calculation.
-    go.Scatter(name=descriptor.get("name"), hovertemplate=descriptor.get("hovertemplate"),
-               line=descriptor.get("line"), marker=descriptor.get("marker"),
-               fillcolor=descriptor.get("fillcolor"))
+    if kind == "bar":
+        go.Bar(name=descriptor.get("name"), hovertemplate=descriptor.get("hovertemplate"),
+               marker=descriptor.get("marker"))
+    else:
+        go.Scatter(name=descriptor.get("name"), hovertemplate=descriptor.get("hovertemplate"),
+                   line=descriptor.get("line"), marker=descriptor.get("marker"),
+                   fillcolor=descriptor.get("fillcolor"))
     return descriptor
+
+
+def overlay_panels(descriptors):
+    """Return consistent panel declarations in first-use order."""
+    panels = {}
+    for descriptor in descriptors:
+        panel = descriptor.get("panel")
+        if panel is None:
+            continue
+        validate_panel(panel)
+        if panel["id"] in panels and panels[panel["id"]] != panel:
+            raise ValueError("Primitives in the same panel must use the same panel declaration.")
+        panels[panel["id"]] = panel
+    return list(panels.values())
 
 
 def legacy_overlays(trends):
@@ -114,6 +135,8 @@ def _selected_indices(positions, arrays, limit):
 
 def window_overlays(descriptors, loaded_range):
     """Return bounded wire descriptors; compact analytic fits need no slicing."""
+    descriptors = list(descriptors)
+    overlay_panels(descriptors)
     output, seen = [], set()
     for source in descriptors:
         validate_overlay(source)
@@ -130,7 +153,7 @@ def window_overlays(descriptors, loaded_range):
         end = bisect_right(positions, loaded_range[1])
         # Keep adjacent points so lines crossing a fractional boundary can
         # interpolate there. Markers must only include actual in-window points.
-        if source["type"] != "markers" and positions:
+        if source["type"] not in ("markers", "bar") and positions:
             first, end = max(0, first - 1), min(len(positions), end + 1)
         clipped_x = list(positions[first:end])
         arrays = [list(source[key][first:end]) for key in keys]
@@ -140,7 +163,7 @@ def window_overlays(descriptors, loaded_range):
             descriptor[key] = [values[index] for index in chosen]
         # Never join disconnected sessions just because intermediate break
         # points were discarded by the bounded display reduction.
-        if source["type"] != "markers":
+        if source["type"] not in ("markers", "bar"):
             previous = None
             for offset, index in enumerate(chosen):
                 if previous is not None and any(value is None for value in arrays[0][previous + 1:index]):
@@ -187,7 +210,9 @@ def _clip_points(descriptor, limits, keys):
 
 
 def overlay_traces(descriptors, loaded_range):
-    """Render primitive descriptors exclusively on the price axes."""
+    """Render primitives on the price axes or their declared indicator panel."""
+    descriptors = list(descriptors)
+    panel_axes = {panel["id"]: index + 3 for index, panel in enumerate(overlay_panels(descriptors))}
     traces = []
     for descriptor in descriptors:
         kind = descriptor["type"]
@@ -196,7 +221,11 @@ def overlay_traces(descriptors, loaded_range):
             meta.update({key: descriptor.get(key) for key in (
                 "trend_id", "lambda_values", "lambda_levels", "primary_lambda", "origin")})
             meta["trend_overlay"] = True
-        common = dict(name=descriptor.get("name", descriptor["id"]), xaxis="x", yaxis="y",
+        panel = descriptor.get("panel")
+        suffix = str(panel_axes[panel["id"]]) if panel else ""
+        if panel:
+            meta["panel_id"] = panel["id"]
+        common = dict(name=descriptor.get("name", descriptor["id"]), xaxis="x" + suffix, yaxis="y" + suffix,
                       showlegend=False, meta=meta, hovertemplate=descriptor.get("hovertemplate"),
                       line=descriptor.get("line"), connectgaps=False)
         if kind == "log_line":
@@ -209,13 +238,19 @@ def overlay_traces(descriptors, loaded_range):
             y = [math.exp(descriptor["intercept"] + descriptor["slope"]
                           * (position - descriptor["start_index"])) for position in x]
             traces.append(go.Scatter(x=x, y=y, mode="lines", **common))
-        elif kind == "markers":
+        elif kind in ("markers", "bar"):
             indices = [index for index, position in enumerate(descriptor["x"])
                        if loaded_range[0] <= position <= loaded_range[1]]
             if indices:
-                traces.append(go.Scatter(x=[descriptor["x"][index] for index in indices],
-                                         y=[descriptor["y"][index] for index in indices], mode="markers",
-                                         marker=descriptor.get("marker"), **common))
+                coordinates = dict(x=[descriptor["x"][index] for index in indices],
+                                   y=[descriptor["y"][index] for index in indices],
+                                   marker=descriptor.get("marker"))
+                if kind == "bar":
+                    traces.append(go.Bar(**coordinates, width=0.65,
+                                         **{key: value for key, value in common.items()
+                                            if key not in ("line", "connectgaps")}))
+                else:
+                    traces.append(go.Scatter(**coordinates, mode="markers", **common))
         else:
             keys = ("lower", "upper") if kind == "band" else ("y",)
             x, values = _clip_points(descriptor, loaded_range, keys)
@@ -228,4 +263,12 @@ def overlay_traces(descriptors, loaded_range):
                                          **{**common, "meta": {**meta, "band_upper": True}}))
             else:
                 traces.append(go.Scatter(x=x, y=values[0], mode="lines", **common))
+    # Plotly omits unused axes. Keep an empty panel alive during warmup and
+    # while newer indicator samples are being fetched for the current viewport.
+    present = {trace.meta.get("panel_id") for trace in traces}
+    for panel_id, number in panel_axes.items():
+        if panel_id not in present:
+            traces.append(go.Scatter(x=[loaded_range[0]], y=[None], mode="lines",
+                xaxis=f"x{number}", yaxis=f"y{number}", showlegend=False, hoverinfo="skip",
+                meta={"chart_overlay": True, "panel_id": panel_id, "panel_placeholder": True}))
     return traces

@@ -49,6 +49,8 @@ class AppliedRun:
                 item = deepcopy(overlay)
                 item["id"] = f"{spec.instance_id}:{item['id']}"
                 item["instance_id"] = spec.instance_id
+                if item.get("panel") is not None:
+                    item["panel"]["id"] = f"{spec.instance_id}:{item['panel']['id']}"
                 outputs.append(item)
         return outputs
 

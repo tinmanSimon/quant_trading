@@ -82,6 +82,48 @@ def test_choices_always_use_complete_result_and_persisted_archive():
     assert Levels.calls == 1
 
 
+def test_static_display_schema_does_not_copy_result_but_returns_isolated_controls():
+    class StaticControls(BaseChartLogic):
+        name = "static_controls"
+        display_schema = {
+            "type": "object", "additionalProperties": False,
+            "properties": {"levels": {"type": "array", "items": {"type": "number"}, "default": [30, 70]}},
+        }
+
+        def calculate(self, context, config, progress=None):
+            return LogicResult()
+
+    class ArchiveWithoutCopy(LogicResult):
+        def __deepcopy__(self, memo):
+            raise AssertionError("Static display schemas must not copy the result archive")
+
+    registry = LogicRegistry()
+    registry.register_class(StaticControls)
+    archive = ArchiveWithoutCopy(tables=[{"name": "Values", "rows": [{"value": 42}]}])
+    controls = registry.display_schema("static_controls", "1", archive)
+    controls["properties"]["levels"]["default"].append(50)
+    assert StaticControls.display_schema["properties"]["levels"]["default"] == [30, 70]
+    assert registry.display_defaults("static_controls", "1", archive) == {"levels": [30, 70]}
+
+
+def test_dynamic_display_schema_receives_an_isolated_result_copy():
+    class MutatingControls(Levels):
+        name = "mutating_controls"
+
+        def display_schema_for(self, result):
+            result.data["available"].append(4)
+            return super().display_schema_for(result)
+
+    registry = LogicRegistry()
+    registry.register_class(MutatingControls)
+    archive = LogicResult(data={"available": [1, 2, 3]})
+    controls = registry.display_schema("mutating_controls", "1", archive)
+    assert controls["properties"]["chosen"]["items"]["enum"] == [1, 2, 3, 4]
+    assert archive.data["available"] == [1, 2, 3]
+    controls["properties"]["chosen"]["items"]["enum"].append(5)
+    assert "enum" not in MutatingControls.display_schema["properties"]["chosen"]["items"]
+
+
 def test_visibility_is_per_instance_and_invalid_display_recovers_without_apply():
     _, runner, _, run = setup()
     hidden = runner.present(run, visibility={"one": False})

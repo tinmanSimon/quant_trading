@@ -176,3 +176,42 @@ def test_zero_budget_disables_retention_without_disabling_charts(stored_chart, l
 def test_invalid_cache_limits_are_rejected(kwargs):
     with pytest.raises(ValueError, match="nonnegative integer"):
         BoundedChartCache(**kwargs)
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_indicator_support_uses_earlier_source_bars_without_expanding_chart(stored_chart, explicit):
+    pipeline, dataset, query, frame = stored_chart
+    query = replace(query, start=frame["timestamp"][1], end=frame["timestamp"][2])
+    arguments = {"dataset_id": dataset.dataset_id} if explicit else {}
+    cache = BoundedChartCache()
+    plain = cache.load(pipeline, query, timeframe="1h", **arguments)
+    series = cache.load(pipeline, query, timeframe="1h", include_support=True, **arguments)
+    assert_frame_equal(series.frame, frame.slice(1, 1))
+    assert_frame_equal(series.support_frame, frame.head(1))
+    assert series.total_count == 1 and series.timestamps == (frame["timestamp"][1],)
+    assert plain.support_frame is None
+    assert series.estimated_size == plain.estimated_size + frame.head(1).estimated_size()
+    assert cache.load(pipeline, query, timeframe="1h", include_support=True, **arguments) is series
+    # Consumers receive a clone; mutating it cannot change the retained data.
+    exported = series.support_frame
+    exported.replace_column(exported.get_column_index("close"), pl.Series("close", [999.]))
+    assert_frame_equal(series.support_frame, frame.head(1))
+
+
+def test_changed_initialization_history_invalidates_cached_series(stored_chart, monkeypatch):
+    pipeline, _, query, frame = stored_chart
+    query = replace(query, start=frame["timestamp"][1])
+    cache = BoundedChartCache()
+    before = cache.load(pipeline, query, timeframe="1h", include_support=True)
+    original = pipeline.read
+
+    def changed(query):
+        return original(query).with_columns(
+            pl.when(pl.col("timestamp") < frame["timestamp"][1])
+            .then(pl.col("close") + .5).otherwise(pl.col("close")).alias("close"))
+
+    monkeypatch.setattr(pipeline, "read", changed)
+    after = cache.load(pipeline, query, timeframe="1h", include_support=True)
+    assert after is not before
+    assert_frame_equal(after.frame, before.frame)
+    assert after.support_frame["close"][0] == before.support_frame["close"][0] + .5

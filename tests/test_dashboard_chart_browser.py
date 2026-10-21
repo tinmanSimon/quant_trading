@@ -291,6 +291,12 @@ def _run_browser_document(tmp_path, document=None, *, url=None, browser_js=None,
                 result = "PENDING"
                 while time.monotonic() < deadline:
                     if native_clicks:
+                        pending_key = command("Runtime.evaluate", expression="window.__testKey", returnByValue=True)
+                        key = pending_key.get("result", {}).get("value")
+                        if key:
+                            command("Input.dispatchKeyEvent", type="keyDown", **key)
+                            command("Input.dispatchKeyEvent", type="keyUp", **key)
+                            command("Runtime.evaluate", expression="delete window.__testKey")
                         pending = command("Runtime.evaluate", expression="window.__testClick", returnByValue=True)
                         point = pending.get("result", {}).get("value")
                         if point:
