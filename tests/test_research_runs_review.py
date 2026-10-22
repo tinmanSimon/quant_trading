@@ -146,3 +146,24 @@ def test_symlink_run_directory_rejected(tmp_path):
     (other / saved.run_id).symlink_to(saved.path, target_is_directory=True)
     with pytest.raises(ResearchError, match="escapes"):
         load_run(other, saved.run_id)
+
+
+@pytest.mark.parametrize(("key", "value"), [
+    ("allocation_mode", "initial_split"),
+    ("skip_initial_missing_bars", True),
+    ("effective_starts", {"AAPL": "2025-01-03T16:30:00+00:00"}),
+    ("requested_tickers", ["AAPL", "NEW"]),
+    ("skipped_tickers", {"NEW": "No bars in the requested interval."}),
+])
+def test_comparison_identity_includes_allocation_and_coverage_policy(key, value):
+    original = manifest()
+    changed = {**original, key: value}
+    assert comparison_identity(original) != comparison_identity(changed)
+
+
+def test_comparison_identity_defaults_match_legacy_and_ignore_worker_count():
+    legacy = manifest()
+    current = {**legacy, "allocation_mode": "per_entry", "skip_initial_missing_bars": False,
+               "effective_starts": {}, "requested_tickers": legacy["tickers"],
+               "skipped_tickers": {}, "max_workers": 4}
+    assert comparison_identity(legacy) == comparison_identity(current)

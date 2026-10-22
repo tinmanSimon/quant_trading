@@ -13,7 +13,7 @@ from numbers import Integral
 
 import polars as pl
 
-from .base import LogicResult, json_copy, validate_panel
+from ..core.base import LogicResult, json_copy, validate_panel
 
 
 def _json(value):

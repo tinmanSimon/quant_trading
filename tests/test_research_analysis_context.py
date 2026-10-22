@@ -8,9 +8,9 @@ import sys
 import polars as pl
 import pytest
 
-from research.analysis.base import LogicContext
-from research.analysis.context import AnalysisContext, Feature
-from research.analysis.signals import crossed_above, crossed_below
+from research.analysis.core.base import LogicContext
+from research.analysis.scripting.context import AnalysisContext, Feature
+from research.analysis.scripting.signals import crossed_above, crossed_below
 from research.analysis import indicators, trend
 
 
@@ -30,7 +30,7 @@ def context(frame=None, *, start=0, cache=None, cutoff=None):
 
 
 def test_research_analysis_import_does_not_load_ui_or_backtesting():
-    result = subprocess.run([sys.executable, "-B", "-c", "import research.analysis.context, sys, json; "
+    result = subprocess.run([sys.executable, "-B", "-c", "import research.analysis.scripting.context, sys, json; "
                              "print(json.dumps([name for name in sys.modules if name.startswith("
                              "('dashboard', 'streamlit', 'research.backtesting', 'research.strategies'))]))"],
                             capture_output=True, text=True, check=True)

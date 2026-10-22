@@ -6,7 +6,11 @@ import math
 import streamlit as st
 
 
-def _configuration(entry):
+def _widget(memory, render, label, **kwargs):
+    return memory.widget(render, label, **kwargs) if memory is not None else render(label, **kwargs)
+
+
+def _configuration(entry, memory=None):
     key = json.dumps(entry.key)
     defaults = entry.default_config
     fields = entry.parameters
@@ -20,9 +24,9 @@ def _configuration(entry):
             for name, field in fields.items())
     use_json = not structured
     if structured:
-        use_json = st.checkbox("Edit configuration as JSON", key=f"strategy-json-mode-{key}")
+        use_json = _widget(memory, st.checkbox, "Edit configuration as JSON", key=f"strategy-json-mode-{key}")
     if use_json:
-        raw = st.text_area("Configuration (JSON)", json.dumps(defaults, indent=2), key=f"strategy-json-{key}")
+        raw = _widget(memory, st.text_area, "Configuration (JSON)", value=json.dumps(defaults, indent=2), key=f"strategy-json-{key}")
         try:
             return entry.validate_config(json.loads(raw))
         except (TypeError, ValueError) as exc:
@@ -35,28 +39,29 @@ def _configuration(entry):
         if "choices" in field:
             choices = field["choices"]
             index = next(i for i, choice in enumerate(choices) if type(choice) is type(value) and choice == value)
-            config[name] = st.selectbox(label, choices, index=index, **kwargs)
+            config[name] = _widget(memory, st.selectbox, label, options=choices, index=index, **kwargs)
         elif field["type"] == "boolean":
-            config[name] = st.checkbox(label, value=value, **kwargs)
+            config[name] = _widget(memory, st.checkbox, label, value=value, **kwargs)
         elif field["type"] == "string":
-            config[name] = st.text_input(label, value=value, **kwargs)
+            config[name] = _widget(memory, st.text_input, label, value=value, **kwargs)
         else:
             number = int if field["type"] == "integer" else float
             bounds = {target: number(field[source]) for source, target in
                       (("minimum", "min_value"), ("maximum", "max_value")) if source in field}
-            config[name] = st.number_input(label, value=number(value),
+            config[name] = _widget(memory, st.number_input, label, value=number(value),
                                           step=number(field.get("step", 1 if number is int else 0.01)),
                                           **bounds, **kwargs)
     return entry.validate_config(config)
 
 
-def strategy_specs(registry):
+def strategy_specs(registry, memory=None):
     """Return selected specifications, or None when user input is invalid."""
     entries = {entry.key: entry for entry in registry.definitions()}
     if not entries:
         st.info("No strategies are registered.")
         return []
-    selected = st.multiselect("Strategies", list(entries), default=[next(iter(entries))],
+    selected = _widget(memory, st.multiselect, "Strategies", options=list(entries), default=[next(iter(entries))],
+                             key="backtest-strategies",
                              format_func=lambda key: f"{entries[key].label} (v{key[1]}) · {key[0]}")
     specs = []
     invalid = False
@@ -66,15 +71,16 @@ def strategy_specs(registry):
         if entry.description:
             st.caption(entry.description)
         try:
-            config = _configuration(entry)
+            config = _configuration(entry, memory)
             specs.append({"name": entry.name, "version": entry.version, "config": config})
         except (ValueError, TypeError) as exc:
             st.error(str(exc))
             invalid = True
-    combine = st.checkbox("Also test a weighted combination", disabled=len(selected) < 2 or ("weighted", "1") not in entries)
+    combine = _widget(memory, st.checkbox, "Also test a weighted combination", key="backtest-combine",
+                      disabled=len(selected) < 2 or ("weighted", "1") not in entries)
     if combine and len(selected) > 1 and not invalid:
         st.caption("Weights are relative and normalized to sum to one. The combination uses one account.")
-        values = [st.number_input(f"Weight: {entries[key].label} (v{key[1]})", min_value=0.0,
+        values = [_widget(memory, st.number_input, f"Weight: {entries[key].label} (v{key[1]})", min_value=0.0,
                                   max_value=1.0, value=1.0, step=0.1, key=f"strategy-weight-{json.dumps(key)}")
                   for key in selected]
         total = math.fsum(values)

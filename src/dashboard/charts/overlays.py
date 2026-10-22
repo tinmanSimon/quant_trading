@@ -14,7 +14,7 @@ from collections.abc import Mapping
 import math
 
 import plotly.graph_objects as go
-from research.analysis.base import validate_panel
+from research.analysis.core.base import validate_panel
 
 from .trend_overlays import MAX_TREND_POINTS, trend_descriptors
 

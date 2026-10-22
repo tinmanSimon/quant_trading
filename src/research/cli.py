@@ -64,6 +64,16 @@ def main(argv=None):
             sub.add_argument("--commission-fixed", type=_decimal, default=Decimal("0"))
             sub.add_argument("--commission-bps", type=_decimal, default=Decimal("0"))
             sub.add_argument("--slippage-bps", type=_decimal, default=Decimal("0"))
+            sub.add_argument("--allocation-mode", choices=("per_entry", "initial_split", "fixed_tenth"), default="per_entry",
+                             help="Allocate shared cash at each entry, split capital once, or budget a fixed percentage of initial capital per bracket entry.")
+            sub.add_argument("--entry-percentage", type=_decimal, default=Decimal("10"),
+                             help="Initial capital percentage per entry in fixed_tenth mode (default: 10).")
+            sub.add_argument("--max-workers", type=int, default=1,
+                             help="Worker processes for initial_split mode (1 to 32).")
+            sub.add_argument("--fractional-shares", action=argparse.BooleanOptionalAction, default=True,
+                             help="Allow fractional purchases with a minimum $5 purchase budget (default: enabled).")
+            sub.add_argument("--skip-initial-missing-bars", action="store_true",
+                             help="Start late tickers after available warm-up history; interior or trailing gaps still fail.")
     commands.add_parser("list-runs")
     args = parser.parse_args(argv)
     try:
@@ -82,9 +92,14 @@ def main(argv=None):
             return 0 if report.ok else 1
         specs = json.loads(args.strategies.read_text(encoding="utf-8"))
         settings = ExecutionSettings(initial_cash=args.initial_cash, commission_fixed=args.commission_fixed,
-                                     commission_bps=args.commission_bps, slippage_bps=args.slippage_bps)
+                                     commission_bps=args.commission_bps, slippage_bps=args.slippage_bps,
+                                     fractional_shares=args.fractional_shares)
         run = app.backtest(**query, strategies=specs, settings=settings, calendar=args.calendar,
-                           layer=args.layer, pipeline_id=args.pipeline_id)
+                           layer=args.layer, pipeline_id=args.pipeline_id,
+                           allocation_mode=args.allocation_mode, max_workers=args.max_workers, entry_percentage=args.entry_percentage,
+                           skip_initial_missing_bars=args.skip_initial_missing_bars)
+        if args.allocation_mode == "initial_split" and run.manifest.get("allocation_summary"):
+            print(json.dumps(run.manifest["allocation_summary"], indent=2))
         print(run.comparison)
         print(f"Saved run: {run.run_id}\nFiles: {run.path}")
         return 0

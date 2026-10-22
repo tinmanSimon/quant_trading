@@ -13,8 +13,8 @@ import polars as pl
 import pytest
 
 from research.analysis import AnalysisContext, LogicContext, LogicRegistry, LogicRunner, LogicSpec, analysis, run_script
-from research.analysis.loader import load_registry
-from research.analysis.scripts import script_class
+from research.analysis.scripting.discovery import load_registry
+from research.analysis.scripting.decorator import script_class
 
 
 class Choice(Enum):

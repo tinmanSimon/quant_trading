@@ -1,7 +1,7 @@
 """Bounded Plotly traces for canonical research trend descriptors."""
 import math
 import plotly.graph_objects as go
-from research.analysis.presentation import lambda_color, trend_descriptors
+from research.analysis.trend.presentation import lambda_color, trend_descriptors
 
 MAX_TREND_POINTS = 768
 

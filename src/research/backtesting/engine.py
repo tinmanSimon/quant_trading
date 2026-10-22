@@ -12,7 +12,7 @@ import polars as pl
 from data_pipeline.schemas import validate_ohlcv
 from research.strategies.base import Strategy, strategy_spec, validate_weight
 
-from .execution import rebalance
+from .execution import SHARE_QUANTUM, rebalance
 from .metrics import calculate_metrics
 from .models import BacktestResult, ExecutionSettings
 
@@ -20,6 +20,26 @@ TIMESTAMP = pl.Datetime("us", "UTC")
 EQUITY_SCHEMA = {"timestamp": TIMESTAMP, "valuation_time": TIMESTAMP, "phase": pl.String, "cash": pl.Float64, "holdings": pl.Int64, "price": pl.Float64, "equity": pl.Float64, "cash_exact": pl.String, "equity_exact": pl.String}
 TRADE_SCHEMA = {"timestamp": TIMESTAMP, "decision_timestamp": TIMESTAMP, "bar_timestamp": TIMESTAMP, "decision_bar_timestamp": TIMESTAMP, "symbol": pl.String, "side": pl.String, "quantity": pl.Int64, "price": pl.Float64, "fees": pl.Float64, "cash": pl.Float64, "holdings": pl.Int64, "target_weight": pl.Float64, "price_exact": pl.String, "fees_exact": pl.String, "cash_exact": pl.String}
 ORDER_SCHEMA = {**TRADE_SCHEMA, "requested_quantity": pl.Int64, "status": pl.String, "reason": pl.String}
+
+
+def result_schemas(settings: ExecutionSettings) -> tuple[dict, dict, dict]:
+    """Retain legacy integer schemas; fractional displays have exact ledgers."""
+    if not settings.fractional_shares:
+        return EQUITY_SCHEMA, TRADE_SCHEMA, ORDER_SCHEMA
+    equity = {**EQUITY_SCHEMA, "holdings": pl.Float64, "holdings_exact": pl.String}
+    trades = {**TRADE_SCHEMA, "quantity": pl.Float64, "holdings": pl.Float64,
+              "quantity_exact": pl.String, "holdings_exact": pl.String}
+    orders = {**trades, "requested_quantity": pl.Float64, "requested_quantity_exact": pl.String,
+              "status": pl.String, "reason": pl.String}
+    return equity, trades, orders
+
+
+def quantity_fields(settings: ExecutionSettings, **quantities: int | Decimal) -> dict:
+    """Create schema-compatible display quantities and lossless decimal text."""
+    if not settings.fractional_shares:
+        return quantities
+    return {**{name: _display_number(value) for name, value in quantities.items()},
+            **{f"{name}_exact": str(value) for name, value in quantities.items()}}
 
 
 def _bound(value, name):
@@ -86,8 +106,8 @@ def run_backtest(frame: pl.DataFrame, strategy: Strategy, *, start: datetime, en
     trades = []
     orders = []
     cash = settings.initial_cash
-    holdings = 0
-    records.append({"timestamp": start, "valuation_time": start, "phase": "initial", "cash": float(cash), "holdings": 0, "price": None, "equity": float(cash), "cash_exact": str(cash), "equity_exact": str(cash)})
+    holdings = Decimal(0) if settings.fractional_shares else 0
+    records.append({"timestamp": start, "valuation_time": start, "phase": "initial", "cash": float(cash), **quantity_fields(settings, holdings=holdings), "price": None, "equity": float(cash), "cash_exact": str(cash), "equity_exact": str(cash)})
     with localcontext() as context:
         # Float64 spans ~632 decimal orders of magnitude. This precision plus
         # bounded settings/Int64 positions prevents ledger subtraction from
@@ -116,24 +136,25 @@ def run_backtest(frame: pl.DataFrame, strategy: Strategy, *, start: datetime, en
                     fill = replace(fill, quantity=0, fees=Decimal(0), cash=cash,
                                    holdings=holdings, status="rejected", reason="no_reported_volume")
                 cash, holdings = fill.cash, fill.holdings
-                trade = {"timestamp": fill_time, "decision_timestamp": decision_time, "bar_timestamp": row["timestamp"], "decision_bar_timestamp": previous["timestamp"], "symbol": symbol, "side": fill.side, "quantity": fill.quantity, "price": _display_number(fill.price), "fees": _display_number(fill.fees), "cash": _display_number(cash), "holdings": holdings, "target_weight": target, "price_exact": str(fill.price), "fees_exact": str(fill.fees), "cash_exact": str(cash)}
-                orders.append({**trade, "requested_quantity": fill.requested_quantity, "status": fill.status, "reason": fill.reason})
+                trade = {"timestamp": fill_time, "decision_timestamp": decision_time, "bar_timestamp": row["timestamp"], "decision_bar_timestamp": previous["timestamp"], "symbol": symbol, "side": fill.side, **quantity_fields(settings, quantity=fill.quantity, holdings=holdings), "price": _display_number(fill.price), "fees": _display_number(fill.fees), "cash": _display_number(cash), "target_weight": target, "price_exact": str(fill.price), "fees_exact": str(fill.fees), "cash_exact": str(cash)}
+                orders.append({**trade, **quantity_fields(settings, requested_quantity=fill.requested_quantity), "status": fill.status, "reason": fill.reason})
                 if fill.quantity:
                     trades.append(trade)
             price = Decimal(str(row["close"]))
             equity = cash + holdings * price
             if cash < 0 or holdings < 0 or equity < 0:
                 raise ArithmeticError("Negative cash, holdings, or equity.")
-            records.append({"timestamp": row["timestamp"], "valuation_time": valuation_time, "phase": "close", "cash": _display_number(cash), "holdings": holdings, "price": float(price), "equity": _display_number(equity), "cash_exact": str(cash), "equity_exact": str(equity)})
-    equity_frame = pl.DataFrame(records, schema=EQUITY_SCHEMA)
-    trade_frame = pl.DataFrame(trades, schema=TRADE_SCHEMA)
+            records.append({"timestamp": row["timestamp"], "valuation_time": valuation_time, "phase": "close", "cash": _display_number(cash), **quantity_fields(settings, holdings=holdings), "price": float(price), "equity": _display_number(equity), "cash_exact": str(cash), "equity_exact": str(equity)})
+    equity_schema, trade_schema, order_schema = result_schemas(settings)
+    equity_frame = pl.DataFrame(records, schema=equity_schema)
+    trade_frame = pl.DataFrame(trades, schema=trade_schema)
     return BacktestResult(
         symbol=symbol,
         strategy_spec=spec,
         settings=settings,
         equity=equity_frame,
         trades=trade_frame,
-        orders=pl.DataFrame(orders, schema=ORDER_SCHEMA),
+        orders=pl.DataFrame(orders, schema=order_schema),
         metrics=calculate_metrics(equity_frame, trade_frame),
-        metadata={"start": start.isoformat(), "end": end.isoformat(), "warmup_bars": first, "account_model": "independent_long_only_whole_shares", "execution": "next_bar_open", "decision_timestamp_semantics": "actual_calendar_bar_close" if times else "start_label_of_completed_decision_bar", "fees_rounding": "upward_to_0.00000001", "cash_arithmetic": "Decimal_800_significant_digits", "end_position_policy": "mark_to_market_at_last_close", "dividends": "excluded", "liquidity_model": "unlimited_at_slipped_open_on_positive_volume_bars", "settings": settings.to_dict()},
+        metadata={"start": start.isoformat(), "end": end.isoformat(), "warmup_bars": first, "account_model": "independent_long_only_fractional_shares" if settings.fractional_shares else "independent_long_only_whole_shares", "share_quantity_precision": str(SHARE_QUANTUM) if settings.fractional_shares else "1", "execution": "next_bar_open", "decision_timestamp_semantics": "actual_calendar_bar_close" if times else "start_label_of_completed_decision_bar", "fees_rounding": "upward_to_0.00000001", "cash_arithmetic": "Decimal_800_significant_digits", "end_position_policy": "mark_to_market_at_last_close", "dividends": "excluded", "liquidity_model": "unlimited_at_slipped_open_on_positive_volume_bars", "settings": settings.to_dict()},
     )

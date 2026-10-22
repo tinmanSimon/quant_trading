@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 import exchange_calendars as xcals
 
-from research.analysis.base import BaseChartLogic, LogicResult
+from research.analysis.core.base import BaseChartLogic, LogicResult
 
 
 class OpenPriceBandsLogic(BaseChartLogic):

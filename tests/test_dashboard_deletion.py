@@ -332,3 +332,82 @@ def test_dashboard_recovers_abandoned_preparation_without_claiming_rows_deleted(
         pipeline.deletion_status(plan.operation_id)
     assert list(pipeline.store.data_dir.rglob("*.parquet")) == [pipeline.store.data_dir / raw.relative_path]
     assert_frame_equal(pipeline.read_dataset(raw.dataset_id), sample_ohlcv_frame)
+
+
+def _batch_preview(app, symbols):
+    app.radio(key="delete-mode").set_value("Batch tickers").run()
+    app.multiselect(key="delete-batch-symbols").set_value(symbols).run()
+    app.button(key="delete-batch-preview").click().run()
+    assert not app.exception and not app.error
+
+
+def _batch_confirm(app):
+    next(c for c in app.checkbox if c.key.startswith("delete-batch-confirm-")).check().run()
+    next(b for b in app.button if b.key.startswith("delete-batch-execute-")).click().run()
+    assert not app.exception
+
+
+@pytest.mark.parametrize("layer", ["raw", "processed"])
+def test_batch_deletes_selected_tickers_only_in_selected_layer(tmp_path, monkeypatch, sample_ohlcv_frame, layer):
+    import dashboard.app as dashboard
+    from data_pipeline.processing import ScalePrices
+    research = Research(tmp_path / "data", tmp_path / "runs")
+    for symbol, provider in [("AAPL", "yahoo"), ("MSFT", "yahoo"), ("KEEP", "yahoo"), ("AAPL", "other")]:
+        raw = research.pipeline.ingest_frame(DataRequest(symbol=symbol, provider=provider, timeframe="1h",
+            start=datetime(2024,1,2,tzinfo=UTC), end=datetime(2024,1,3,tzinfo=UTC)),
+            sample_ohlcv_frame.with_columns(pl.lit(symbol).alias("symbol"))).raw
+        for factor in (2,3):
+            research.pipeline.process(raw.dataset_id, processors=[ScalePrices(factor=factor)])
+    before = research.pipeline.list_datasets(DataQuery(layer=layer, include_history=True))
+    paths = {d.dataset_id: research.pipeline.store.data_dir / d.relative_path for d in before}
+    monkeypatch.setattr(dashboard, "Research", lambda **kwargs: research)
+    app = AppTest.from_string("from dashboard.app import main\nmain()").run()
+    app.sidebar.radio[0].set_value("Delete data").run()
+    app.radio(key="delete-layer").set_value(layer).run()
+    app.selectbox(key="delete-provider").set_value("yahoo").run()
+    _batch_preview(app, ["AAPL", "MSFT"])
+    assert next(b for b in app.button if b.key.startswith("delete-batch-execute-")).disabled
+    assert all(path.exists() for path in paths.values())
+    _batch_confirm(app)
+    assert not app.error
+    assert any("All selected ticker deletions completed" in s.value for s in app.success)
+    for d in before:
+        assert paths[d.dataset_id].exists() == (d.request.symbol == "KEEP" or d.request.provider == "other")
+    other = "processed" if layer == "raw" else "raw"
+    assert len(research.pipeline.list_datasets(DataQuery(layer=other))) == (8 if other == "processed" else 4)
+    report = app.session_state["delete-batch-results"]
+    assert {r["ticker"] for r in report} == {"AAPL", "MSFT"}
+    assert all(r["status"] == "completed" for r in report)
+
+
+def test_batch_selection_change_invalidates_confirmation(fake_page):
+    app, pipeline = fake_page
+    _batch_preview(app, ["AAPL"])
+    next(c for c in app.checkbox if c.key.startswith("delete-batch-confirm-")).check().run()
+    app.multiselect(key="delete-batch-symbols").set_value([]).run()
+    assert not any(b.key.startswith("delete-batch-execute-") for b in app.button)
+    assert not pipeline.deletions
+
+
+def test_batch_failure_stops_later_operations_and_reports_partial_completion(fake_page):
+    app, pipeline = fake_page
+    third = SimpleNamespace(**vars(pipeline.items[-1]))
+    third.pipeline_id = "pipeline-c"
+    pipeline.items.append(third)
+    app.radio(key="delete-layer").set_value("processed").run()
+    _batch_preview(app, ["AAPL"])
+    original = pipeline.delete
+    def fail_second(plan, *, confirm):
+        if len(pipeline.deletions) == 1:
+            pipeline.deletions.append(plan)
+            raise StorageError("Storage changed after preview")
+        return original(plan, confirm=confirm)
+    pipeline.delete = fail_second
+    _batch_confirm(app)
+    assert len(pipeline.deletions) == 2
+    report = app.session_state["delete-batch-results"]
+    assert [r["status"] for r in report] == ["completed", "failed", "not_attempted"]
+    assert "Storage changed" in report[1]["message"]
+    assert "delete-batch-plan" not in app.session_state
+    app.run()
+    assert not any(b.key.startswith("delete-batch-execute-") for b in app.button)

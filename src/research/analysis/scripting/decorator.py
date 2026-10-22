@@ -11,7 +11,7 @@ from data_pipeline.processing.configuration import (
     configuration_schema, construct_from_config, validated_config,
 )
 
-from .base import BaseChartLogic, LogicContext, LogicResult, json_copy
+from ..core.base import BaseChartLogic, LogicContext, LogicResult, json_copy
 from .context import AnalysisContext
 from .results import AnalysisResult
 

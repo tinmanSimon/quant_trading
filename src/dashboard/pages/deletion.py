@@ -2,7 +2,9 @@
 
 from datetime import UTC, datetime, time, timedelta
 
+import polars as pl
 import streamlit as st
+from uuid import uuid4
 
 from data_pipeline import DataQuery
 from data_pipeline.exceptions import DatasetNotFoundError
@@ -86,12 +88,87 @@ def _operations(pipeline) -> bool:
     return bool(pending)
 
 
+def _batch_delete(pipeline, items, *, root, layer, provider, pending):
+    symbols = st.multiselect("Tickers to delete", sorted({item.request.symbol for item in items}),
+                             key="delete-batch-symbols")
+    st.caption("Deletes all dates, timeframes, processing pipelines, and historical revisions for the selected tickers in this layer and provider.")
+    identity = (root, layer, provider, tuple(sorted(symbols)))
+    if st.session_state.get("delete-batch-identity") != identity:
+        st.session_state.pop("delete-batch-plan", None)
+        st.session_state["delete-batch-identity"] = identity
+    if st.button("Preview batch deletion", key="delete-batch-preview", disabled=pending or not symbols):
+        st.session_state.pop("delete-batch-plan", None)
+        groups = {}
+        for item in items:
+            if item.request.symbol in symbols:
+                groups.setdefault((item.request.symbol, item.request.timeframe, item.pipeline_id), []).append(item)
+        try:
+            plans = []
+            with st.spinner("Verifying all selected ticker data…"):
+                for (symbol, timeframe, pipeline_id), group in sorted(groups.items()):
+                    plans.append(pipeline.plan_delete(DataQuery(
+                        layer=layer, provider=provider, symbol=symbol, timeframe=timeframe,
+                        pipeline_id=pipeline_id if layer == "processed" else None,
+                        start=min(item.first_timestamp for item in group),
+                        end=max(item.last_timestamp for item in group) + timedelta(milliseconds=1),
+                        include_history=True,
+                    )))
+            st.session_state["delete-batch-plan"] = (uuid4().hex, plans)
+        except Exception as error:
+            st.error(f"Could not prepare batch deletion: {type(error).__name__}: {error}")
+    batch = st.session_state.get("delete-batch-plan")
+    if batch is None:
+        return
+    batch_id, plans = batch
+    st.subheader("Batch deletion preview")
+    st.write(f"{layer} · {provider} · {', '.join(symbols)}")
+    st.dataframe(pl.DataFrame([
+        {"ticker": plan.query.symbol, "timeframe": plan.query.timeframe,
+         "pipeline": plan.query.pipeline_id or "", "rows_to_remove": plan.removed_rows,
+         "rows_to_retain": plan.retained_rows, "source_bytes": plan.source_bytes}
+        for plan in plans
+    ]), hide_index=True)
+    with st.expander("Affected files"):
+        for plan in plans:
+            st.write(f"{plan.query.symbol} · {plan.query.timeframe} · {plan.query.pipeline_id or 'raw'}")
+            st.dataframe(plan.to_frame(), hide_index=True)
+    st.write(f"Total rows to remove: {sum(plan.removed_rows for plan in plans):,}")
+    st.warning("This permanently removes the previewed data with no undo. Other layers and providers remain unchanged. "
+               "Saved results remain available, but deleted source revisions cannot be reread. "
+               "Operations run sequentially: if one fails, completed deletions are not rolled back and remaining operations are not attempted.")
+    confirmed = st.checkbox("I understand this permanently deletes all previewed ticker data.",
+                            key=f"delete-batch-confirm-{batch_id}")
+    if st.button("Delete selected tickers permanently", type="primary", key=f"delete-batch-execute-{batch_id}",
+                 disabled=not confirmed or pending or not any(plan.removed_rows for plan in plans)) and confirmed and not pending:
+        st.session_state.pop("delete-batch-plan", None)
+        results = []
+        failed = False
+        with st.spinner("Deleting selected ticker data…"):
+            for plan in plans:
+                row = {"ticker": plan.query.symbol, "timeframe": plan.query.timeframe,
+                       "pipeline": plan.query.pipeline_id or "", "operation_id": plan.operation_id,
+                       "status": "not_attempted", "message": ""}
+                if not failed:
+                    try:
+                        report = pipeline.delete(plan, confirm=plan.operation_id)
+                        st.session_state["delete-report"] = report
+                        row.update(status=report.status, message=f"{report.removed_rows:,} rows removed")
+                        failed = report.status != "completed"
+                    except Exception as error:
+                        failed = True
+                        row.update(status="failed", message=f"{type(error).__name__}: {error}")
+                results.append(row)
+        st.session_state["delete-batch-results"] = results
+        st.rerun()
+
+
 def deletion_page(research):
     """Render the two-step deletion workflow against the public pipeline API."""
     pipeline = research.pipeline
     root = str(pipeline.store.data_dir.resolve())
     if st.session_state.get("delete-root") != root:
-        for key in ("delete-plan", "delete-query", "delete-report", "delete-recovery-notice"):
+        for key in ("delete-plan", "delete-query", "delete-report", "delete-recovery-notice",
+                    "delete-batch-plan", "delete-batch-identity", "delete-batch-results"):
             st.session_state.pop(key, None)
         st.session_state["delete-root"] = root
 
@@ -102,14 +179,31 @@ def deletion_page(research):
     if pending:
         st.info("Finish the pending physical cleanup before starting another deletion.")
 
+    batch_results = st.session_state.get("delete-batch-results")
+    if batch_results:
+        st.subheader("Last batch deletion report")
+        if all(row["status"] == "completed" for row in batch_results):
+            st.success("All selected ticker deletions completed.")
+        else:
+            st.warning("Batch deletion stopped before completing all operations. Review statuses and any pending cleanup above.")
+        st.dataframe(pl.DataFrame(batch_results), hide_index=True)
+    mode = st.radio("Deletion mode", ["Single series", "Batch tickers"], horizontal=True, key="delete-mode")
+    if st.session_state.get("delete-previous-mode") != mode:
+        _clear_preview()
+        st.session_state.pop("delete-batch-plan", None)
+        st.session_state["delete-previous-mode"] = mode
     layer = st.radio("Delete from layer", ["raw", "processed"], horizontal=True, key="delete-layer")
     items = pipeline.list_datasets(DataQuery(layer=layer, include_history=True))
     if not items:
         _clear_preview()
+        st.session_state.pop("delete-batch-plan", None)
         st.info(f"No local {layer} datasets are available to delete.")
         return
     provider = st.selectbox("Provider", sorted({item.request.provider for item in items}), key="delete-provider")
     items = [item for item in items if item.request.provider == provider]
+    if mode == "Batch tickers":
+        _batch_delete(pipeline, items, root=root, layer=layer, provider=provider, pending=pending)
+        return
     symbol = st.selectbox("Ticker to delete", sorted({item.request.symbol for item in items}), key="delete-symbol")
     items = [item for item in items if item.request.symbol == symbol]
     timeframe = st.selectbox("Timeframe", sorted({item.request.timeframe for item in items}), key="delete-timeframe")

@@ -121,7 +121,7 @@ from pathlib import Path
 import streamlit as st
 from dashboard.app import _data_page
 from dashboard.state import workspace
-from research.analysis import loader
+from research.analysis.scripting import discovery as loader
 from research import Research
 loader.project_root = lambda: Path({str(tmp_path)!r})
 workspace.DEFAULT_DIRECTORY = Path({str(directory)!r})

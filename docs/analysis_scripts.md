@@ -213,6 +213,75 @@ For a decorated function you already imported, use
 the same result. Or call `function(analysis_context, ...)` directly for normal
 Python use, then finalize its builder.
 
+## Multi-ticker analysis and saved runs
+
+The dashboard's **Analysis** page runs the same analyses across a selected list
+of local tickers. Choose the provider, timeframe, raw or processed series, date
+range, and tickers (including pasted lists or all available tickers). Add one or
+more analyses, configure their settings, then click **Run analysis**. Different
+instances of an analysis retain independent settings and summaries.
+
+The page displays overall metrics, a ranked ticker summary, and original text
+and tables for the selected ticker. It does not render charts. Category/count
+tables, such as `outcome` / `count`, automatically become summable metrics.
+Single-row numeric summaries also supply ranking columns; non-count quantities
+have no overall aggregation until one is selected. **Summary settings** can
+select table columns and per-ticker reducers, overall sum/mean/min/max, or ratios
+of named metrics. Ratios use matching tickers' summed numerators and denominators,
+not the average of their individual percentages. Missing values and failures
+remain distinct from zero. Free-form prose is shown without guessing numeric
+totals. Sorting, filtering, and changing summary rules do not execute analyses.
+
+Each run pins its source revision IDs, analysis settings, and code fingerprints.
+Earlier available bars supply indicator initialization history just as in Market
+data; the chosen date range bounds the reported analysis. There are no automatic
+downloads or backtest portfolio/account rules. Missing data and calculation
+failures are reported independently; successful analyses remain available.
+
+**Concurrent tickers** bounds the number of loaded ticker histories. The default
+is one. Increasing it can help workloads that release Python's GIL, but uses
+more memory and does not guarantee faster Python-only scripts. **Stop after
+current tickers** prevents further submissions; active calculations finish and
+remain available to inspect or save. Existing scripts may still construct chart descriptors internally;
+the batch runner discards them before persistence.
+
+Dashboard runs are temporary by default. After completion (including a stopped run),
+**Save analysis** keeps the results; **Delete analysis** removes the selected saved run.
+Unsaved results are available only in the current session until the next run.
+Historical saved batches live under `<research runs directory>/analysis/<run-id>/`.
+Each contains a manifest with settings, source identities, statuses, and compact
+metrics, plus separately checksummed compressed JSON for ticker details.
+Aggregation preferences are stored separately. **Saved analysis run** reopens a
+batch without executing its scripts. An interrupted server does not automatically
+resume calculations, but completed saved results remain readable. Market data's
+single latest workspace snapshot remains separate from this batch history.
+
+The same batch engine works from research code:
+
+```python
+from datetime import UTC, datetime
+from data_pipeline import DataPipeline
+from research.analysis import LogicSpec, load_registry
+from research.analysis.batch import BatchRequest, BatchRunner, BatchStore
+
+store = BatchStore("runs/analysis")
+runner = BatchRunner(DataPipeline("data"), load_registry(), store)
+manifest = runner.execute(
+    BatchRequest(
+        tickers=("AAPL", "MSFT"), timeframe="1d",
+        start=datetime(2024, 1, 1, tzinfo=UTC),
+        end=datetime(2025, 1, 1, tzinfo=UTC), workers=1,
+    ),
+    [LogicSpec("example", "ma_rsi_example", "1", {"fast": 20, "slow": 60})],
+)
+saved = store.load_ticker(manifest["run_id"], "AAPL")
+```
+
+`create(request, specs)` followed by `run(run_id, cancel=event)` provides the
+same execution with explicit preparation and cooperative cancellation. A run
+can be executed once; start another run to calculate again. Loading saved results
+does not require the original private script to remain installed.
+
 ## Reloading and compatibility
 
 Script and helper source fingerprints participate in cache identity, including
@@ -223,9 +292,20 @@ has been fixed. Import errors and duplicate IDs appear in discovery issues;
 successful analyses remain available. A calculation failure is isolated to that
 instance. Results store a fingerprint, not private source code.
 
-The canonical packages are `research.analysis`, `.indicators`, and `.trend`.
-Import indicators from `research.analysis.indicators` and trend analysis from
-`research.analysis.trend`; their former top-level packages have been removed.
-The shared execution and registry APIs live in `research.analysis`. Built-in classes live under
-`research.analysis.builtins`; private scripts normally use the function toolkit.
-Neither calculation layer imports the dashboard.
+The public imports remain in `research.analysis`; private scripts do not need to
+change imports when implementation files move. Internally the package is grouped
+by responsibility:
+
+- `core/`: analysis contracts, registry, input boundaries, and execution for one
+  data context.
+- `scripting/`: `@analysis`, function adapters, private discovery, `AnalysisContext`,
+  result builders, and signal expressions.
+- `batch/`: multi-ticker orchestration, metric aggregation, and saved batch runs.
+- `indicators/`: shared numerical indicators.
+- `trend/`: trend calculations, selection, and declarative trend presentation.
+- `builtins/`: discoverable indicator, trend, and open-price-band analyses.
+
+The former loose infrastructure modules have been removed. Import indicators
+from `research.analysis.indicators` and trend analysis from
+`research.analysis.trend`; their former top-level packages have also been removed.
+The research analysis packages do not import the dashboard.

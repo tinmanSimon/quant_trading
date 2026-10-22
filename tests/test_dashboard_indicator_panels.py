@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from research.analysis.base import LogicResult
+from research.analysis.core.base import LogicResult
 from dashboard.chart_component import _javascript, window_payload
 from dashboard.chart_overlays import MAX_OVERLAY_POINTS, overlay_traces, validate_overlay, window_overlays
 from test_dashboard_chart_browser import _run_browser_document

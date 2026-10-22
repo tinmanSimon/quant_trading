@@ -1,6 +1,6 @@
-"""Compatibility alias for :mod:`research.analysis.input`."""
+"""Compatibility alias for :mod:`research.analysis.core.input`."""
 
 import importlib
 import sys
 
-sys.modules[__name__] = importlib.import_module("research.analysis.input")
+sys.modules[__name__] = importlib.import_module("research.analysis.core.input")

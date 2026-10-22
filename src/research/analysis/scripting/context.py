@@ -16,8 +16,8 @@ from numbers import Integral
 
 import polars as pl
 
-from . import indicators
-from .input import bar_available_at, completed_prefix
+from .. import indicators
+from ..core.input import bar_available_at, completed_prefix
 
 
 _IDENTITY_COLUMNS = ("symbol", "ticker", "instrument", "provider", "timeframe", "interval")
@@ -296,7 +296,7 @@ class AnalysisContext:
         starting point. Earlier initialization endpoints are omitted by default;
         fitted intervals may still start at negative initialization indices.
         """
-        from . import trend
+        from .. import trend
 
         if not isinstance(include_history, bool):
             raise ValueError("include_history must be a boolean")

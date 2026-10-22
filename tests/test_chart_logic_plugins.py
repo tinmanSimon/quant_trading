@@ -8,10 +8,10 @@ import math
 import polars as pl
 import pytest
 
-from research.analysis.base import LogicContext, LogicResult
+from research.analysis.core.base import LogicContext, LogicResult
 from research.analysis.builtins.open_price_bands import OpenPriceBandsLogic
 from research.analysis.builtins.trend import TrendLogic
-from research.analysis.registry import discover_logics
+from research.analysis.core.registry import discover_logics
 from dashboard.trend_selection import select_trends
 from research.analysis.trend import TrendConfig, analyze
 

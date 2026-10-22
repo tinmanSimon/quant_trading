@@ -6,6 +6,7 @@ import math
 import polars as pl
 
 from .base import Strategy, strategy_spec, validate_weight
+from .bracket import BracketStrategy
 
 
 class WeightedStrategy(Strategy):
@@ -25,6 +26,11 @@ class WeightedStrategy(Strategy):
         self.weights = tuple(value / total for value in self.weights)
         for child in children:
             strategy_spec(child)
+            if isinstance(child, BracketStrategy):
+                raise ValueError(
+                    "Bracket strategies require shared portfolio execution and "
+                    "cannot be included in a weighted allocation combination."
+                )
         self.strategies = tuple(deepcopy(child) for child in children)
         self.lookback = max(child.lookback for child in self.strategies)
 

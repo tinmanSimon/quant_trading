@@ -1,7 +1,8 @@
 """Explicit instrument calendars and completed bar intervals."""
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, time
+from zoneinfo import ZoneInfo
 
 import exchange_calendars as xcals
 import pandas as pd
@@ -33,13 +34,17 @@ class ExpectedBar:
 
 
 def expected_bars(instrument: Instrument, *, start: datetime, end: datetime,
-                  timeframe: str, lookback: int = 0) -> tuple[ExpectedBar, ...]:
+                  timeframe: str, lookback: int = 0, trading_period: str = "regular") -> tuple[ExpectedBar, ...]:
     """Return preceding warm-up bars followed by every requested bar.
 
     Daily keys are session dates at UTC midnight. Intraday keys represent real
     instants, anchored to the session open; early-close final bars can be short.
     """
     timeframe = normalize_timeframe(timeframe)
+    if trading_period not in {"regular", "09:00-15:00"}:
+        raise ResearchError("Unsupported trading period.")
+    if trading_period != "regular" and (timeframe != "1h" or instrument.calendar != "XNYS"):
+        raise ResearchError("09:00-15:00 trading requires 1h bars on the XNYS calendar.")
     is_daily = timeframe == "1d"
     duration = bar_duration(timeframe)
     if type(lookback) is not int or lookback < 0:
@@ -64,6 +69,9 @@ def expected_bars(instrument: Instrument, *, start: datetime, end: datetime,
         for label, session in sessions:
             opened = session["open"].to_pydatetime().astimezone(UTC)
             closed = session["close"].to_pydatetime().astimezone(UTC)
+            if trading_period == "09:00-15:00":
+                local = opened.astimezone(ZoneInfo("America/New_York"))
+                opened = datetime.combine(local.date(), time(9), local.tzinfo).astimezone(UTC)
             if is_daily:
                 key = datetime.combine(label.date(), datetime.min.time(), UTC)
             else:

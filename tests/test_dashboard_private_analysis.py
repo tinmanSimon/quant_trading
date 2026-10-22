@@ -11,7 +11,7 @@ from research import Research
 
 def test_private_analysis_reload_display_navigation_and_failures(tmp_path, monkeypatch):
     from dashboard import app as dashboard
-    from research.analysis import loader
+    from research.analysis.scripting import discovery as loader
 
     project = tmp_path / "private-project"
     scripts = project / "secrete_analysis" / "analyses"

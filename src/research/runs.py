@@ -71,9 +71,11 @@ def save_run(root: Path, results: list[BacktestResult], manifest: dict) -> Resea
             entry = {"symbol": result.symbol, "strategy_spec": result.strategy_spec,
                      "settings": result.settings.to_dict(), "metrics": result.metrics,
                      "metadata": result.metadata, "files": {}}
-            for name in ("equity", "trades", "orders"):
-                path = staging / f"{index}-{name}.parquet"
+            for name in ("equity", "trades", "orders", "completed_trades", "open_positions"):
                 frame = getattr(result, name)
+                if name in ("completed_trades", "open_positions") and frame.width == 0:
+                    continue
+                path = staging / f"{index}-{name}.parquet"
                 frame.write_parquet(path)
                 if not pl.read_parquet(path).equals(frame):
                     raise ResearchError("Research artifact changed during Parquet round trip.")
@@ -127,7 +129,9 @@ def load_run(root: Path, run_id: str) -> ResearchRun:
     results = []
     for entry in document["results"]:
         frames = {}
-        for name in ("equity", "trades", "orders"):
+        for name in ("equity", "trades", "orders", "completed_trades", "open_positions"):
+            if name in ("completed_trades", "open_positions") and name not in entry["files"]:
+                continue
             item = entry["files"][name]
             artifact = path / item["path"]
             if artifact.is_symlink() or artifact.resolve().parent != path.resolve():
@@ -137,7 +141,10 @@ def load_run(root: Path, run_id: str) -> ResearchRun:
             if _checksum(artifact) != item["sha256"]:
                 raise ResearchError(f"Research artifact checksum failed: {artifact.name}.")
             frames[name] = pl.read_parquet(artifact)
-        settings = ExecutionSettings(**{key: Decimal(value) for key, value in entry["settings"].items()})
+        settings = ExecutionSettings(**{
+            key: value if key == "fractional_shares" else Decimal(value)
+            for key, value in entry["settings"].items()
+        })
         results.append(BacktestResult(symbol=entry["symbol"], strategy_spec=entry["strategy_spec"],
                                       settings=settings, metrics=entry["metrics"],
                                       metadata=entry["metadata"], **frames))
@@ -164,6 +171,15 @@ def comparison_identity(manifest: dict) -> dict:
             "instruments", "calendar_version", "price_basis", "return_basis", "account_mode",
             "execution_settings", "engine_sha256")
     result = {key: manifest[key] for key in keys}
+    result["trading_period"] = manifest.get("trading_period", "regular")
+    result["allocation_mode"] = manifest.get("allocation_mode", "per_entry")
+    if result["allocation_mode"] == "fixed_tenth":
+        result["entry_percentage"] = format(Decimal(str(manifest.get("entry_percentage", 10))).normalize(), "f")
+    result["skip_initial_missing_bars"] = manifest.get("skip_initial_missing_bars", False)
+    result["skip_problematic_tickers"] = manifest.get("skip_problematic_tickers", False)
+    result["effective_starts"] = manifest.get("effective_starts", {})
+    result["requested_tickers"] = manifest.get("requested_tickers", manifest["tickers"])
+    result["skipped_tickers"] = manifest.get("skipped_tickers", {})
     result["pipeline_id"] = manifest.get("pipeline_id")
     result["processors"] = manifest.get("processors")
     result["parent_sources"] = {

@@ -7,12 +7,12 @@ private-script discovery.
 from importlib import import_module
 
 _EXPORTS = {
-    "BaseChartLogic": "base", "LogicContext": "base", "LogicResult": "base", "LogicSpec": "base",
-    "LogicDefinition": "registry", "LogicRegistry": "registry", "discover_logics": "registry",
-    "AppliedRun": "runner", "LogicRunner": "runner",
-    "AnalysisContext": "context", "Feature": "context", "AnalysisResult": "results",
-    "analysis": "scripts", "run_script": "scripts", "load_registry": "loader",
-    "crossed_above": "signals", "crossed_below": "signals",
+    "BaseChartLogic": "core.base", "LogicContext": "core.base", "LogicResult": "core.base", "LogicSpec": "core.base",
+    "LogicDefinition": "core.registry", "LogicRegistry": "core.registry", "discover_logics": "core.registry",
+    "AppliedRun": "core.runner", "LogicRunner": "core.runner",
+    "AnalysisContext": "scripting.context", "Feature": "scripting.context", "AnalysisResult": "scripting.results",
+    "analysis": "scripting.decorator", "run_script": "scripting.decorator", "load_registry": "scripting.discovery",
+    "crossed_above": "scripting.signals", "crossed_below": "scripting.signals",
 }
 __all__ = list(_EXPORTS)
 

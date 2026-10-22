@@ -11,8 +11,8 @@ from copy import deepcopy
 import polars as pl
 
 from research.analysis import indicators
-from research.analysis.base import BaseChartLogic, LogicResult
-from research.analysis.input import completed_prefix
+from research.analysis.core.base import BaseChartLogic, LogicResult
+from research.analysis.core.input import completed_prefix
 from data_pipeline.processing.configuration import validated_config
 
 

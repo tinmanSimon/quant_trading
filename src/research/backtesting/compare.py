@@ -1,4 +1,4 @@
-"""Compare independent results without pretending accounts share capital."""
+"""Compare separate strategy simulations, including shared portfolios."""
 
 import json
 
@@ -8,8 +8,8 @@ from .models import BacktestResult
 
 
 def compare_results(results: list[BacktestResult]) -> pl.DataFrame:
-    """Return one metric row per strategy/ticker; never sum equity curves."""
+    """Return one metric row per simulation; never sum separate equity curves."""
     return pl.DataFrame([
         {"symbol": result.symbol, "strategy": result.strategy_spec["name"], "version": result.strategy_spec["version"], "config": json.dumps(result.strategy_spec["config"], sort_keys=True), **dict(sorted(result.metrics.items()))}
         for result in results
-    ])
+    ], infer_schema_length=None)

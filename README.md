@@ -336,6 +336,15 @@ scripts and imports edits; script/helper fingerprints invalidate stale results
 while preserving configured instances. Private Python runs with application
 permissions and should come from trusted local authors.
 
+The **Analysis** page runs these same scripts across multiple local tickers,
+without charts. It shows overall metrics, ranked ticker summaries, and individual
+text/table results. Counts are summed automatically; other metrics and ratios
+can be configured in **Summary settings** without changing scripts. Runs are temporary
+by default. Click **Save analysis** after a run finishes to keep it
+under `<runs directory>/analysis/`. Reopen it through **Saved analysis run**,
+or use **Delete analysis** to remove the selected saved run. Market data continues
+to save only its latest workspace snapshot. Concurrency is bounded, and stopping a batch preserves completed results.
+
 See [Writing research analyses](docs/analysis_scripts.md) for the toolkit,
 result builders, history/alignment rules, and running the same scripts from
 research without the dashboard.
@@ -708,7 +717,8 @@ at a time, and reserve later untouched periods for frozen-configuration review.
 No labeled training dataset is required.
 
 Open the local URL printed by Streamlit. The sidebar selects **Market data**,
-**Fetch**, **Backtest**, or **Saved runs**, and the data/results roots. Dataset
+**Analysis**, **Fetch**, **Process data**, **Backtest**, **Saved runs**, or
+**Delete data**, and the data/results roots. Dataset
 charts have candlesticks, volume, drag/scroll zoom, an overview navigator and reset
 controls. Charts open on the latest 50 bars (or all bars for smaller datasets);
 use **All history**, **Latest 50**, or the overview's period sliders to navigate.
@@ -843,8 +853,10 @@ and cannot prove the provider supplied every real trade or correct prices.
 Replacements receive fresh reports; processing/compaction preserve lineage and
 combined reports. Old recorded omissions do not override a bar now present.
 
-Each strategy/ticker pair starts with its own cash account. There is no shared
-capital portfolio, leverage, short selling or fractional-share trading.
+Allocation strategies give each strategy/ticker pair its own cash account.
+Stop/target strategies support the capital allocation modes described below.
+Neither mode allows leverage or short selling. The dashboard enables fractional
+shares by default; API execution settings retain whole shares unless requested.
 At each completed bar, the strategy returns a target allocation in `[0, 1]`.
 That target is rebalanced at the next available scheduled bar's open using
 that open's price plus configured adverse slippage. Fees and price gaps are
@@ -872,6 +884,92 @@ Yahoo's vendor-provided historical split treatment remains in its raw prices;
 these results are not a reconstruction of a broker account across corporate
 actions. There is no live order execution. These assumptions are also saved
 in result metadata.
+
+### Shared portfolios with stop and target exits
+
+Strategies implementing `research.strategies.BracketStrategy` run through the
+same preflight, Backtest page, and saved-run pipeline. **Capital allocation**
+selects one of three modes:
+
+- **Distribute at each entry:** one shared cash account. Each new entry receives
+  available cash divided by all eligible tickers not currently held, including
+  those without a signal. Simultaneous entries use one allocation snapshot.
+- **Fixed percentage of initial capital per entry:** set **Initial capital per entry (%)**
+  to 5, 7, 10 (the default), or another percentage. Each signal gets that percentage
+  of the original capital, including fees and slippage. Skip the signal if
+  available cash cannot cover the full budget. Later signals may use replenished
+  sale proceeds; skipped signals are not queued. Simultaneous signals are handled
+  in ascending ticker order. This mode requires stop/target strategies and runs
+  sequentially (`allocation_mode="fixed_tenth", entry_percentage=7` in Python;
+  `--entry-percentage 7` in the CLI).
+- **Split once at start:** divide total initial capital equally among the usable
+  tickers. Each ticker retains its own cash and sale proceeds throughout the run.
+  Independent ticker simulations can run in parallel using **Parallel workers**.
+  A late-starting ticker's allocation remains idle until its warm-up completes.
+  The report includes a combined summary per strategy and individual ticker details.
+
+Both modes include fees and slippage in purchase budgets and leave existing
+holdings unchanged. **Allow fractional shares** is enabled by default in the
+dashboard: purchases need a budget of at least $5, with quantities rounded down
+to eight decimal places. This is a minimum purchase budget, not a $5 cash reserve.
+Complete sales can be smaller than $5. Exact quantity and cash strings are saved
+alongside display values. Python callers enable this with
+`ExecutionSettings(fractional_shares=True)`.
+
+**Allow missing history at start** lets a ticker join once it has enough real
+warm-up bars. Only a missing leading prefix is tolerated: gaps after the first
+available bar, including trailing gaps, still fail preflight. Tickers with no
+usable execution bars are excluded with a recorded reason. In the shared mode,
+a ticker joins the allocation pool at its effective start. Both settings are
+recorded with saved runs. The Python options are
+`allocation_mode="initial_split"`, `max_workers=4`, and
+`skip_initial_missing_bars=True`; defaults retain shared per-entry execution and
+strict history checks. Parallel workers require importable strategy classes;
+local private registrations are loaded in each spawned worker.
+
+**Skip problematic tickers** excludes tickers that fail local-data validation
+(such as missing bars or corrupt files) and continues with the valid tickers.
+Excluded tickers receive no capital; the summary and saved run include their
+error codes and reasons. If no tickers remain, the run stops. This option defaults
+to off and does not suppress strategy execution errors. Python callers use
+`skip_problematic_tickers=True`.
+
+For `1h` data, **Trading period → Hourly bar starts 09:00–15:00 (New York)**
+accepts clock-aligned bars from 09:00 through 15:00, ending at 16:00, without shifting their
+timestamps or changing their prices. Bars outside 09:00 inclusive to 16:00 exclusive
+are excluded. Python callers use
+`trading_period="09:00-15:00"`. This mode uses XNYS trading dates and New York
+daylight-saving time. On early-close days it requires only bars starting before
+the official close, excludes later bars from execution, and records warnings in
+the report and saved run. Missing bars before the close and missing ordinary
+sessions still fail validation. The default remains the regular-session grid.
+
+The Backtest page automatically saves its configuration locally per data directory,
+including strategy selections and parameters, JSON drafts, combination weights,
+capital, fees, and validation options. These settings survive page navigation and
+application restarts without needing to run a backtest.
+
+Bracket strategies may provide `prepare_entry_signals(history)` to compute a
+causal boolean series once per ticker. Row i must depend only on rows through i;
+future rows must never change earlier decisions. The engine enters using row i-1
+at row i's open. Strategies without this optional method keep the existing
+completed-history `entry_signal` interface.
+
+Entry decisions use completed bars and execute at the following open. Fixed
+stop and target multipliers use that entry bar's raw open. Exit checks include
+the entry bar and require strict high/low crossings; touching a threshold does
+not exit. Crossing both thresholds records an inconclusive stop and sells at
+the modeled stop price. Exits use threshold prices with configured adverse
+slippage, including across gaps; this is a simplified fill assumption. Their
+exact intrabar time is unknown, so proceeds become available at bar close.
+Zero-volume bars cannot execute orders.
+
+The report includes wins, losses, inconclusive stops, completed-trade details,
+open positions, and realized/unrealized/total P&L after costs. Unresolved positions
+are valued at their final close. Details record bar positions within the loaded
+history (including warm-up), timestamps, allocations, quantities, thresholds,
+prices and costs. These tables survive saving and reopening. Stop/target
+strategies cannot be included in weighted allocation combinations.
 
 ### Strategies, results and reproducibility
 
@@ -999,6 +1097,9 @@ src/
 │   ├── strategies/      # Versioned strategies and weighted combinations
 │   ├── backtesting/     # Causal execution, cash accounting and metrics
 │   ├── analysis/        # Script toolkit, registry, execution and plain results
+│   │   ├── core/       # Contracts, registry and per-context execution
+│   │   ├── scripting/  # Decorator, discovery, context and result builders
+│   │   ├── batch/      # Multi-ticker execution, aggregation and saved runs
 │   │   ├── indicators/ # Shared numerical indicators
 │   │   ├── trend/      # Historical trend analysis and selection
 │   │   └── builtins/   # Discoverable indicator/trend/open-price analyses
@@ -1006,8 +1107,9 @@ src/
 │   └── cli.py            # quant-research command
 └── dashboard/
     ├── app.py            # Streamlit entry and routing
-    ├── pages/            # Market data, fetch, processing, backtests and runs
+    ├── pages/            # Market data, analysis, fetch, processing and backtests
     ├── market_data/      # Analysis controls, display, results and navigation
+    ├── batch_analysis/   # Batch job state and text result presentation
     ├── charts/           # Series, bounded cache, rendering and browser assets
     ├── components/       # Shared schema and strategy controls
     └── state/            # Workspace persistence and migrations
@@ -1515,6 +1617,13 @@ outputs; rerun processing on the compacted raw ID. Compaction reduces files
 read by active queries, but retaining history uses additional disk space.
 
 ### Delete local data and reclaim storage
+
+For multiple tickers, use **Delete data → Deletion mode → Batch tickers**.
+Select a layer, provider, and tickers, then preview and confirm. This removes all
+stored dates, timeframes, pipelines, and historical revisions for that selection.
+The batch report lists each operation's outcome. A failure stops the remaining
+operations; completed deletions are not rolled back. Pending physical cleanup
+uses the same recovery controls as single-series deletion.
 
 Open **Delete data** in the dashboard. Select raw or processed, provider, ticker,
 timeframe and a UTC start/end; processed data also requires a specific pipeline.

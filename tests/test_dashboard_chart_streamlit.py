@@ -443,7 +443,7 @@ def test_chart_streamlit_window_round_trips(tmp_path):
     app.write_text(
         "import streamlit as st\nfrom dashboard.app import _data_page\nfrom research import Research\n"
         "from pathlib import Path\nimport dashboard.trend_settings as settings\nimport dashboard.workspace as workspace\n"
-        "from research.analysis import loader as analysis_loader\n"
+        "from research.analysis.scripting import discovery as analysis_loader\n"
         f"analysis_loader.project_root = lambda: Path({str(tmp_path / 'private-test-project')!r})\n"
         f"settings.DEFAULT_SETTINGS_PATH = Path({str(settings_path)!r})\n"
         f"workspace.DEFAULT_DIRECTORY = Path({str(tmp_path / 'workspaces')!r})\n"

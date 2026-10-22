@@ -39,7 +39,7 @@ def isolate_private_strategy_discovery(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def isolate_private_analysis_discovery(tmp_path, monkeypatch):
     """Never execute the user's ignored analysis scripts during tests."""
-    from research.analysis import loader
+    from research.analysis.scripting import discovery as loader
     monkeypatch.setattr(loader, "project_root", lambda: tmp_path / "test-project")
 
 

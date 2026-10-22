@@ -13,8 +13,8 @@ from pathlib import Path
 import sys
 from threading import RLock
 
-from .registry import discover_logics
-from .scripts import TOOLKIT_VERSION, is_analysis, script_class
+from ..core.registry import discover_logics
+from .decorator import TOOLKIT_VERSION, is_analysis, script_class
 
 
 _CACHE = {}
@@ -23,7 +23,7 @@ _GENERATION = 0
 
 
 def project_root():
-    return Path(__file__).resolve().parents[3]
+    return Path(__file__).resolve().parents[4]
 
 
 class _SnapshotImporter(importlib.abc.MetaPathFinder, importlib.abc.Loader):
@@ -63,8 +63,8 @@ class _SnapshotImporter(importlib.abc.MetaPathFinder, importlib.abc.Loader):
 
 def _private(root, reload):
     global _GENERATION
-    from .indicators import ALGORITHM_VERSION as indicator_version
-    from .trend import ALGORITHM_VERSION as trend_version
+    from ..indicators import ALGORITHM_VERSION as indicator_version
+    from ..trend import ALGORITHM_VERSION as trend_version
 
     sources = {path.relative_to(root): path.read_bytes() for path in sorted(root.rglob("*.py"))
                if "__pycache__" not in path.parts}

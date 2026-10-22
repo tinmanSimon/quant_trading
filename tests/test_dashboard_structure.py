@@ -17,7 +17,7 @@ import pytest
     ("dashboard.trend_settings", "dashboard.state.trend_settings"),
     ("dashboard.trends", "dashboard.market_data.legacy_trends"),
     ("dashboard.logic_controls", "dashboard.market_data.analysis_controls"),
-    ("dashboard.trend_input", "research.analysis.input"),
+    ("dashboard.trend_input", "research.analysis.core.input"),
     ("dashboard.trend_selection", "research.analysis.trend.selection"),
 ])
 def test_legacy_imports_reference_the_canonical_module(old, new):

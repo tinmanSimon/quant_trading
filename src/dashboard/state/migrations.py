@@ -1,7 +1,7 @@
 """Compatibility for saved trend selections and former trend-only results."""
 
 from research.analysis import AppliedRun, LogicSpec
-from research.analysis.runner import source_key
+from research.analysis.core.runner import source_key
 
 
 def upgrade_trend_windows(selection, registry):

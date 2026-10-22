@@ -6,8 +6,8 @@ from datetime import date, datetime
 
 import polars as pl
 
-from research.analysis.base import BaseChartLogic, LogicResult
-from research.analysis.presentation import trend_descriptors
+from research.analysis.core.base import BaseChartLogic, LogicResult
+from research.analysis.trend.presentation import trend_descriptors
 from research.analysis.trend.selection import (
     filter_trends_by_lambda,
     filter_trends_by_slope,

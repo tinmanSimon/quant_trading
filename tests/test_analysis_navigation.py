@@ -6,8 +6,8 @@ import polars as pl
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from research.analysis.base import LogicResult, LogicSpec
-from research.analysis.runner import AppliedRun
+from research.analysis.core.base import LogicResult, LogicSpec
+from research.analysis.core.runner import AppliedRun
 from dashboard.charts.component import navigation_request, window_payload
 from dashboard.market_data.navigation import analysis_events, event_command
 from test_dashboard_trend_overlays import series
@@ -60,8 +60,8 @@ def navigation_app():
     from datetime import UTC, datetime, timedelta
     import polars as pl
     import streamlit as st
-    from research.analysis.base import LogicResult, LogicSpec
-    from research.analysis.runner import AppliedRun
+    from research.analysis.core.base import LogicResult, LogicSpec
+    from research.analysis.core.runner import AppliedRun
     from dashboard.charts.series import ChartSeries
     from dashboard.market_data.navigation import render_analysis_navigation
 

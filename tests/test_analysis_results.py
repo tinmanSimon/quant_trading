@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import polars as pl
 import pytest
 
-from research.analysis.results import AnalysisResult
+from research.analysis.scripting.results import AnalysisResult
 
 
 def context():
