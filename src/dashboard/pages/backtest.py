@@ -22,6 +22,9 @@ def _short_account_caption():
 
 
 def _show_result(run, *, ui=st):
+    if run.manifest.get("flow") == "factor":
+        from dashboard.pages.factor_backtest import show_factor_result
+        return show_factor_result(run, ui=ui)
     st = ui
     st.subheader(f"Run {run.run_id}")
     warnings = run.manifest.get("warnings", [])

@@ -89,6 +89,58 @@ def test_drop_all_incomplete_intervals_is_an_error():
             ResampleIntraday(schedule, incomplete="drop").transform(minute_frame(schedule).head(1), DataContract("1m"))
 
 
+def test_aggregate_available_uses_observed_ohlcv_and_preserves_empty_intervals():
+    schedule = (session(minutes=90),)
+    original = minute_frame(schedule)
+    # Missing opening/interior/closing minutes, followed by a wholly absent interval.
+    absent = [0, 7, 29, *range(30, 60)]
+    source = original.filter(~pl.col("timestamp").is_in(original["timestamp"].gather(absent).implode()))
+    processor = ResampleIntraday(schedule, incomplete="aggregate_available")
+    with pytest.warns(ResamplingWarning, match="Aggregated available minutes in 1.*omitted 1 empty intervals"):
+        result = processor.transform(source, DataContract("1m"))
+    assert result.frame.to_dicts() == [
+        {"timestamp": schedule[0].open, "symbol": "AAPL", "open": 101., "high": 130., "low": 100., "close": 129., "volume": 270.},
+        {"timestamp": schedule[0].open + timedelta(minutes=60), "symbol": "AAPL", "open": 160., "high": 191., "low": 159., "close": 190., "volume": 300.},
+    ]
+    assert processor.quality_report(source)["missing_minutes"].to_list() == [3, 30]
+    assert source.height == 57
+
+
+def test_aggregate_available_retains_partial_only_input_and_roundtrips():
+    processor = ResampleIntraday((session(),), incomplete="aggregate_available")
+    source = minute_frame(processor.sessions).head(1)
+    pipeline = Pipeline([processor])
+    restored = load_pipeline(pipeline.canonical_json)
+    assert restored.fingerprint == pipeline.fingerprint
+    with pytest.warns(ResamplingWarning, match="59 missing 1m bars"):
+        output = restored.run(source, DataContract("1m")).frame
+    assert_frame_equal(output, source)
+
+
+def test_aggregate_available_cannot_create_bars_from_only_extended_hours():
+    processor = ResampleIntraday((session(),), incomplete="aggregate_available")
+    source = minute_frame(processor.sessions).head(1).with_columns(
+        (pl.col("timestamp") - timedelta(minutes=1)).alias("timestamp"))
+    with pytest.warns(ResamplingWarning) as captured:
+        with pytest.raises(ProcessingError, match="No observed intraday intervals"):
+            processor.transform(source, DataContract("1m"))
+    assert any("omitted 2 empty intervals" in str(item.message) for item in captured)
+
+
+def test_aggregate_available_does_not_mix_symbols():
+    processor = ResampleIntraday((session(),), incomplete="aggregate_available")
+    source = pl.concat([minute_frame(processor.sessions).head(1),
+                        minute_frame(processor.sessions, "MSFT").tail(1)])
+    with pytest.warns(ResamplingWarning, match="omitted 2 empty intervals"):
+        output = processor.transform(source, DataContract("1m")).frame
+    assert output.select("symbol", "open", "volume").to_dicts() == [
+        {"symbol": "AAPL", "open": 100., "volume": 10.},
+        {"symbol": "MSFT", "open": 159., "volume": 10.},
+    ]
+    assert output["timestamp"].to_list() == [processor.sessions[0].open,
+                                           processor.sessions[0].open + timedelta(minutes=30)]
+
+
 @pytest.mark.parametrize("timeframe", ["30m", "1h"])
 def test_dst_early_close_and_short_final_hour_agree_with_backtest(timeframe):
     sessions = []

@@ -22,6 +22,9 @@ def _json_editor(label, schema, value, memory, key):
 
 
 def _sessions(label, schema, value, memory, key, bounds):
+    if schema.get("regular_only"):
+        return _regular_sessions(label, schema, value, memory, key, bounds)
+
     import exchange_calendars as xcals
     from zoneinfo import available_timezones
 
@@ -90,6 +93,29 @@ def _sessions(label, schema, value, memory, key, bounds):
         try:
             sessions = generate_schedule(calendar, first, last, mode=mode, timezone=timezone,
                                          opening=opening, closing=closing, opening_day=opening_day)
+            memory.values["widgets"][key] = json.dumps(sessions, indent=2)
+        except Exception as error:
+            st.error(f"Could not generate sessions: {error}")
+    return _json_editor(label, schema, value, memory, key)
+
+
+def _regular_sessions(label, schema, value, memory, key, bounds):
+    """Pin regular exchange sessions without offering custom-hour overrides."""
+    calendar = schema.get("calendar", "XNYS")
+    st.markdown(f"**{label}**")
+    st.caption(f"Uses {calendar} regular trading sessions: 09:30–16:00 New York time, "
+               "with exchange holidays, daylight-saving changes, and early closes. "
+               "Pre-market and after-hours bars are excluded.")
+    first, last = bounds or (date.today(), date.today())
+    left, right = st.columns(2)
+    first = memory.widget(left.date_input, "First session date", value=first, key=key + "-first")
+    last = memory.widget(right.date_input, "Last session date (inclusive)", value=last, key=key + "-last")
+    st.caption("Click Generate session schedule to apply these dates. The JSON below is saved with "
+               "the pipeline; editing the dates alone does not replace it. Output timestamps are UTC. "
+               "Only the exchange's actual regular opening and closing times are accepted.")
+    if st.button("Generate session schedule", key=key + "-generate"):
+        try:
+            sessions = generate_schedule(calendar, first, last, mode=REGULAR_HOURS)
             memory.values["widgets"][key] = json.dumps(sessions, indent=2)
         except Exception as error:
             st.error(f"Could not generate sessions: {error}")

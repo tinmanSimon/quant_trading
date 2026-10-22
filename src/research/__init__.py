@@ -16,6 +16,7 @@ _EXPORTS = {
     "PreflightReport": (".datasets", "PreflightReport"),
     "DataIssue": (".datasets", "DataIssue"),
     "Instrument": (".instruments", "Instrument"),
+    "FactorBacktestSpec": (".factors", "FactorBacktestSpec"),
 }
 __all__ = list(_EXPORTS)
 

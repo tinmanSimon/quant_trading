@@ -1,5 +1,6 @@
 """Research preflight, simulations and saved runs."""
 
+from dataclasses import replace
 from hashlib import sha256
 from importlib.metadata import version
 from pathlib import Path
@@ -11,11 +12,31 @@ from data_pipeline import DataPipeline
 from .backtesting import ExecutionSettings, run_backtest, run_portfolio_backtest
 from .backtesting.initial_split import run_initial_split_backtests, summarize_initial_split, validate_allocation_options
 from .backtesting.portfolio import validate_entry_percentage
-from .datasets import prepare_snapshot
+from .datasets import normalize_tickers, prepare_snapshot
 from .errors import PreflightError, ResearchError
+from .instruments import Instrument
 from .runs import ResearchRun, comparison_identity, list_runs, load_run, save_run
 from .strategies import StrategyRegistry, load_registry, load_strategy, strategy_spec
 from .strategies.bracket import BracketStrategy
+
+
+def _engine_environment() -> dict:
+    source_root = Path(__file__).parent
+    digest = sha256()
+    for source in sorted(source_root.rglob("*.py")):
+        digest.update(str(source.relative_to(source_root)).encode())
+        digest.update(source.read_bytes())
+    return {
+        "engine_sha256": digest.hexdigest(),
+        "packages": {name: version(name) for name in ("polars", "pandas", "exchange-calendars")},
+    }
+
+
+_RETROSPECTIVE_EXCLUSION = {
+    "ticker": "PORTFOLIO", "code": "retrospective_ticker_exclusion",
+    "message": "Skipping problematic tickers removes them from the entire test using full-period data checks. "
+               "A later data problem can therefore change earlier portfolio decisions and introduce selection bias.",
+}
 
 
 class Research:
@@ -64,6 +85,131 @@ class Research:
                                   skip_problematic_tickers=skip_problematic_tickers, trading_period=trading_period).report
         except PreflightError as exc:
             return exc.report
+
+    @staticmethod
+    def _factor_configuration(spec, factor_registry=None, portfolio_registry=None):
+        from .factors import FactorBacktestSpec, FactorRegistry, FactorSpec
+        from .portfolio import PortfolioRegistry, validate_schedule
+
+        if isinstance(spec, dict):
+            spec = FactorBacktestSpec.from_dict(spec)
+        if not isinstance(spec, FactorBacktestSpec):
+            raise TypeError("spec must be FactorBacktestSpec or its serialized dictionary.")
+        factor_registry = factor_registry if factor_registry is not None else FactorRegistry()
+        portfolio_registry = portfolio_registry if portfolio_registry is not None else PortfolioRegistry()
+        # Configuration errors must fail before reading historical data or
+        # running any factor/policy, including when no ticker passes preflight.
+        for factor in spec.factors:
+            factor_registry.load(factor)
+        portfolio_registry.load(spec.portfolio)
+        if spec.portfolio.name == "inverse_volatility":
+            column = spec.portfolio.config.get("volatility_factor", "volatility")
+            if column not in {factor.name for factor in spec.factors}:
+                if (not isinstance(column, str) or not column.strip()
+                        or column in {"timestamp", "symbol", "score"} or column.startswith("__")):
+                    raise ValueError("volatility_factor must be a nonreserved factor column name.")
+                factor_registry.load(FactorSpec(
+                    "volatility", lookback=spec.portfolio.config.get("volatility_lookback", 20)))
+        validate_schedule(spec.schedule)
+        return spec, factor_registry, portfolio_registry
+
+    def _factor_snapshot(self, tickers, spec, **kwargs):
+        symbols = normalize_tickers(tickers, provider=kwargs["provider"], start=kwargs["start"],
+                                    end=kwargs["end"], timeframe=kwargs["timeframe"])
+        calendar = kwargs["calendar"]
+        for symbol in symbols:
+            instrument = self.instruments.get(symbol, Instrument(symbol, calendar))
+            if instrument.calendar != calendar:
+                raise ResearchError("Factor portfolios require one common exchange calendar; "
+                                    f"{symbol} uses {instrument.calendar}, but this run uses {calendar}.")
+        return prepare_snapshot(self.pipeline, tickers=symbols, lookback=spec.lookback,
+                                instruments=self.instruments, **kwargs)
+
+    def factor_preflight(self, tickers, *, spec, start, end, timeframe="1d", provider="yahoo",
+                         calendar="XNYS", as_of=None, layer="raw", pipeline_id=None,
+                         skip_initial_missing_bars=False, skip_problematic_tickers=False,
+                         trading_period="regular", factor_registry=None, portfolio_registry=None):
+        """Validate a factor experiment against pinned local, completed bars.
+
+        No factors or portfolio decisions run during preflight. The optional
+        problematic-ticker filter uses the entire interval, so it is explicitly
+        reported as retrospective universe selection.
+        """
+        spec, _, _ = self._factor_configuration(spec, factor_registry, portfolio_registry)
+        try:
+            report = self._factor_snapshot(
+                tickers, spec, start=start, end=end, timeframe=timeframe, provider=provider,
+                calendar=calendar, as_of=as_of, layer=layer, pipeline_id=pipeline_id,
+                skip_initial_missing_bars=skip_initial_missing_bars,
+                skip_problematic_tickers=skip_problematic_tickers, trading_period=trading_period,
+            ).report
+        except PreflightError as exc:
+            report = exc.report
+        if skip_problematic_tickers:
+            report = replace(report, warnings=report.warnings + (dict(_RETROSPECTIVE_EXCLUSION),))
+        return report
+
+    def factor_backtest(self, tickers, *, spec, start, end, timeframe="1d", provider="yahoo",
+                        calendar="XNYS", as_of=None, settings: ExecutionSettings | None = None,
+                        layer="raw", pipeline_id=None, skip_initial_missing_bars=False,
+                        skip_problematic_tickers=False, trading_period="regular",
+                        factor_registry=None, portfolio_registry=None) -> ResearchRun:
+        """Run a long-only shared-account factor portfolio and save its audits.
+
+        Scores use completed bars and targets execute at a later bar's open.
+        Factor portfolios default to fractional shares with the established
+        $5 minimum purchase budget; explicit ExecutionSettings take precedence.
+        """
+        import exchange_calendars as xcals
+
+        from .backtesting.factor_engine import run_factor_backtest
+
+        spec, factor_registry, portfolio_registry = self._factor_configuration(
+            spec, factor_registry, portfolio_registry)
+        settings = settings if settings is not None else ExecutionSettings(fractional_shares=True)
+        if not isinstance(settings, ExecutionSettings):
+            raise TypeError("settings must be ExecutionSettings.")
+        snapshot = self._factor_snapshot(
+            tickers, spec, start=start, end=end, timeframe=timeframe, provider=provider,
+            calendar=calendar, as_of=as_of, layer=layer, pipeline_id=pipeline_id,
+            skip_initial_missing_bars=skip_initial_missing_bars,
+            skip_problematic_tickers=skip_problematic_tickers, trading_period=trading_period,
+        )
+        times_by_symbol = {
+            symbol: {bar.timestamp: (bar.open, bar.close) for bar in snapshot.bars[symbol]}
+            for symbol in snapshot.frames
+        }
+        result = run_factor_backtest(
+            snapshot.frames, spec, start=start, end=end, settings=settings,
+            bar_times=times_by_symbol, effective_starts=snapshot.effective_starts,
+            factor_registry=factor_registry, portfolio_registry=portfolio_registry,
+            session_timezone=str(xcals.get_calendar(calendar).tz),
+        )
+        serialized_spec = spec.to_dict()
+        assumptions = {
+            "price_basis": snapshot.manifest["price_basis"],
+            "corporate_actions": "No automatic split adjustment or corporate-action position accounting.",
+            "dividends": "Excluded from cash and returns.",
+            "universe": "User-selected symbols, not a reconstructed point-in-time historical universe.",
+            "selection": ("Full-period problematic-ticker exclusions may introduce selection bias."
+                          if skip_problematic_tickers else "Strict complete-data preflight; no problematic-ticker exclusions."),
+        }
+        manifest = dict(snapshot.manifest)
+        manifest.update(
+            flow="factor", factor_spec=serialized_spec,
+            account_mode="shared_cash_long_only_factor", allocation_mode="factor_targets",
+            execution_settings=settings.to_dict(), assumptions=assumptions,
+            factor_execution={"sale_proceeds": spec.sale_proceeds, "funding": spec.funding,
+                              "unfilled_orders": "expire_after_intended_open"},
+            strategies=[result.strategy_spec], **_engine_environment(),
+        )
+        result.metadata.update(flow="factor", layer=manifest["layer"],
+                               price_basis=manifest["price_basis"], assumptions=assumptions)
+        if layer == "processed":
+            result.metadata["pipeline_id"] = manifest["pipeline_id"]
+        if skip_problematic_tickers:
+            manifest["warnings"] = [*manifest.get("warnings", []), dict(_RETROSPECTIVE_EXCLUSION)]
+        return save_run(self.runs_dir, [result], manifest)
 
     def backtest(self, tickers, *, strategies, start, end, timeframe="1d", provider="yahoo",
                  calendar="XNYS", as_of=None, settings: ExecutionSettings | None = None,
@@ -129,13 +275,7 @@ class Research:
                                         else "shared_long_only_usd_portfolios")
         manifest["execution_settings"] = settings.to_dict()
         manifest["strategies"] = [strategy_spec(worker) for worker in workers]
-        source_root = Path(__file__).parent
-        digest = sha256()
-        for source in sorted(source_root.rglob("*.py")):
-            digest.update(str(source.relative_to(source_root)).encode())
-            digest.update(source.read_bytes())
-        manifest["engine_sha256"] = digest.hexdigest()
-        manifest["packages"] = {name: version(name) for name in ("polars", "pandas", "exchange-calendars")}
+        manifest.update(_engine_environment())
         return save_run(self.runs_dir, results, manifest)
 
     def list_runs(self):

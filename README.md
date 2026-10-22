@@ -1004,6 +1004,19 @@ register factories in `StrategyRegistry` and provide it to `Research`.
 Version custom code whenever its behavior changes; external custom strategy
 source is not automatically archived or fingerprinted.
 
+### Factor portfolio backtests
+
+The dashboard's **Factor backtest** flow and `Research.factor_backtest(...)`
+combine causal factors, cross-sectional scores, interchangeable portfolio
+policies, and calendar-based rebalancing in one shared long-only account.
+Equal, score, and inverse-volatility weighting share the same execution ledger;
+cash reserves, position caps, turnover limits, purchase funding, and sale-proceeds
+timing are configurable. Saved runs include factors, targets, rebalances, orders,
+fills, and achieved holdings. Existing strategy backtests keep their behavior.
+
+See [factor portfolio backtesting](docs/factor_backtesting.md) for setup, Python
+examples, extension contracts, execution details, and historical-data limitations.
+
 ### Private strategies
 
 Personal implementations live in the root-level `private_strategies/` package.

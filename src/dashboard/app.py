@@ -12,6 +12,7 @@ from dashboard.pages.runs import _runs_page
 from dashboard.pages.processing import processing_page
 from dashboard.pages.deletion import deletion_page
 from dashboard.pages.analysis import _analysis_page
+from dashboard.pages.factor_backtest import factor_backtest_page
 from dashboard.state.workspace import market_memory
 from research import Research
 
@@ -53,12 +54,12 @@ def main():
             st.warning(directories.warning)
         st.caption(f"Data: {Path(data_dir).expanduser().resolve()}")
         st.caption(f"Results: {Path(runs_dir).expanduser().resolve()}")
-        page = st.radio("Navigate", ["Market data", "Analysis", "Fetch", "Process data", "Backtest", "Saved runs", "Delete data"], key="dashboard-page")
+        page = st.radio("Navigate", ["Market data", "Analysis", "Fetch", "Process data", "Backtest", "Factor backtest", "Saved runs", "Delete data"], key="dashboard-page")
         st.caption("Local data · reproducible research")
     # A store switch must not leave results from another directory on screen.
     identity = (str(Path(data_dir).expanduser().resolve()), str(Path(runs_dir).expanduser().resolve()))
     if st.session_state.get("store-identity") != identity:
-        for key in ("fetch-report", "backtest-run"):
+        for key in ("fetch-report", "backtest-run", "factor-run"):
             st.session_state.pop(key, None)
         st.session_state["store-identity"] = identity
     data_path, runs_path = map(Path, identity)
@@ -70,7 +71,8 @@ def main():
     try:
         research = Research(data_dir=data_dir, runs_dir=runs_dir)
         {"Market data": _data_page, "Analysis": _analysis_page, "Fetch": _fetch_page, "Process data": processing_page,
-         "Backtest": _backtest_page, "Saved runs": _runs_page, "Delete data": deletion_page}[page](research)
+         "Backtest": _backtest_page, "Factor backtest": factor_backtest_page,
+         "Saved runs": _runs_page, "Delete data": deletion_page}[page](research)
     except Exception as error:
         # Domain errors are displayed while preserving the local store; full
         # traceback remains available for diagnosing a failed operation.

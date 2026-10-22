@@ -65,6 +65,13 @@ class DataPipeline:
 
         return load_plan(self, plan_id)
 
+    def recover_databento(self, plan_id: str, *, drop_invalid_outside_regular=False, progress=None) -> dict:
+        """Recover failed imports from decoded cache without any network requests."""
+        from .databento_batch import recover_cached
+
+        return recover_cached(self, plan_id, drop_invalid_outside_regular=drop_invalid_outside_regular,
+                              progress=progress)
+
     def databento_plans(self) -> list[dict]:
         from .databento_batch import list_plans
 

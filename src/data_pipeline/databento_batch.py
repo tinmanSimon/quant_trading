@@ -26,7 +26,7 @@ from .batch_fetch import BatchFetchReport, FetchOutcome
 from .exceptions import EmptyDataError, InvalidDataRequestError, ProviderError
 from .fetch_planning import plan_fetch, plan_missing_fetch
 from .models import DataQuery, DataRequest
-from .quality import FetchResult
+from .quality import FetchQuality, FetchResult, OmittedBar
 from .schemas import validate_ohlcv
 from .storage.layout import contained_path
 from .storage.locking import store_lock
@@ -525,18 +525,130 @@ def _read_parts(pipeline, paths):
     return pl.concat(frames).sort("symbol", "timestamp")
 
 
-def _publish(pipeline, plan, symbol, item_plan, groups):
+def _recover_frame(frame, timeframe):
+    """Omit invalid OHLC only when its entire bar misses XNYS regular trading.
+
+    Valid extended-hours bars are retained. The original decoded cache remains
+    untouched, and ordinary validation still rejects in-session missing prices,
+    invalid volume, and malformed finite OHLC. Calendar lookup is local.
+    """
+    import exchange_calendars as xcals
+    from zoneinfo import ZoneInfo
+
+    if timeframe not in {"1m", "1h"}:
+        raise InvalidDataRequestError("Local Databento recovery supports native 1m and 1h bars.")
+    invalid = pl.any_horizontal(~pl.col(name).is_finite().fill_null(False)
+                                for name in ("open", "high", "low", "close"))
+    bad = frame.filter(invalid)
+    omitted = []
+    if bad.height:
+        stamps = bad["timestamp"].to_list()
+        if any(stamp is None or stamp.utcoffset() is None for stamp in stamps):
+            raise InvalidDataRequestError("Cannot classify invalid bars without timezone-aware timestamps.")
+        duration = timedelta(minutes=1) if timeframe == "1m" else timedelta(hours=1)
+        zone = ZoneInfo("America/New_York")
+        first = min(stamps).astimezone(zone).date() - timedelta(days=7)
+        last = (max(stamps) + duration).astimezone(zone).date() + timedelta(days=7)
+        calendar = xcals.get_calendar("XNYS", start=str(first), end=str(last))
+        sessions = {label.date(): (row["open"].to_pydatetime(), row["close"].to_pydatetime())
+                    for label, row in calendar.schedule.iterrows()}
+        for stamp in stamps:
+            ending = stamp + duration
+            dates = {stamp.astimezone(zone).date(), ending.astimezone(zone).date()}
+            overlaps = any(date in sessions and stamp < sessions[date][1] and ending > sessions[date][0]
+                           for date in dates)
+            if not overlaps:
+                omitted.append(OmittedBar(stamp, "Invalid OHLC outside XNYS regular session; omitted during local Databento recovery."))
+        if omitted:
+            omitted_stamps = pl.Series([bar.timestamp for bar in omitted], dtype=frame.schema["timestamp"])
+            frame = frame.filter(~(invalid & pl.col("timestamp").is_in(omitted_stamps.implode())))
+    return FetchResult(validate_ohlcv(frame), FetchQuality(
+        status="reported", skip_missing_ohlc=True, omitted_bars=tuple(omitted),
+        provider_version="databento-local-recovery-v1"))
+
+
+def recover_cached(pipeline, plan_id, *, drop_invalid_outside_regular=False, progress=None):
+    """Retry failed publications using decoded local files only, never a provider.
+
+    No submission, status lookup, download, or credential is involved. Successful
+    tickers remain unchanged. Recorded publishing intent permits restart after
+    an interrupted catalog commit without producing duplicate revisions.
+    """
+    if type(drop_invalid_outside_regular) is not bool:
+        raise InvalidDataRequestError("drop_invalid_outside_regular must be a boolean.")
+    _path(pipeline, plan_id)
+    with store_lock(_root(pipeline) / "locks" / plan_id, timeout=0.1):
+        plan = load_plan(pipeline, plan_id)
+        recovery = plan.get("local_recovery")
+        if plan["status"] not in {"completed", "completed_with_errors"} and recovery is None:
+            raise InvalidDataRequestError("Local recovery requires a completed plan with cached failed imports.")
+        candidates = {symbol: item for symbol, item in plan["ticker_plans"].items()
+                      if item["status"] in {"failed", "publishing"}}
+        if not candidates:
+            return plan
+        if any(item["status"] == "publishing" for item in candidates.values()) and (
+                recovery is None or recovery["drop_invalid_outside_regular"] != drop_invalid_outside_regular):
+            raise InvalidDataRequestError("Resume interrupted recovery with its original omission policy.")
+        groups = {group["id"]: group for group in plan["groups"]}
+        current = _snapshot(pipeline, candidates)
+        # Fail before any publication if caches are missing or the original
+        # plan's storage assumptions have changed. Never fall back to fetching.
+        for symbol, item in candidates.items():
+            dependencies = [groups[identifier] for identifier in item["groups"]]
+            if not dependencies or any(group["status"] != "decoded" for group in dependencies):
+                raise InvalidDataRequestError(f"{symbol}: decoded local data is unavailable; no download was attempted.")
+            paths = [path for group in dependencies for path in group.get("parts", {}).get(symbol, [])]
+            if not paths or any(not contained_path(_root(pipeline), path).is_file() for path in paths):
+                raise InvalidDataRequestError(f"{symbol}: decoded cache is missing; no download was attempted.")
+            if item["status"] != "publishing" and current[symbol] != plan["snapshot"][symbol]:
+                raise InvalidDataRequestError(f"{symbol}: local coverage changed since this plan; existing data was preserved.")
+        if recovery is None:
+            plan["local_recovery"] = {
+                "started_at": datetime.now(UTC).isoformat(),
+                "drop_invalid_outside_regular": drop_invalid_outside_regular,
+                "previous_outcomes": [row for row in plan["outcomes"] if row["ticker"] in candidates],
+                "source": "decoded_local_cache", "network_requests": 0,
+            }
+        else:
+            recovery["drop_invalid_outside_regular"] = drop_invalid_outside_regular
+        _save(pipeline, plan)
+        for count, (symbol, item) in enumerate(candidates.items(), 1):
+            dependencies = [groups[identifier] for identifier in item["groups"]]
+            try:
+                outcome = _publish(pipeline, plan, symbol, item, dependencies,
+                                   drop_invalid_outside_regular=drop_invalid_outside_regular)
+                item["status"] = outcome["status"]
+            except Exception as exc:
+                item["status"] = "empty" if isinstance(exc, EmptyDataError) else "failed"
+                outcome = _outcome(symbol, item["status"], item["request"],
+                                   error_type=type(exc).__name__, error_message=str(exc))
+            plan["outcomes"] = [row for row in plan["outcomes"] if row["ticker"] != symbol] + [outcome]
+            _update_status(plan)
+            _save(pipeline, plan)
+            if progress is not None:
+                progress({"ticker": symbol, "status": item["status"], "completed": count,
+                          "total": len(candidates), "row_count": outcome.get("row_count", 0),
+                          "omitted_bars": len(outcome.get("quality", {}).get("omitted_bars", []))})
+        plan["local_recovery"]["finished_at"] = datetime.now(UTC).isoformat()
+        _save(pipeline, plan)
+        return plan
+
+
+def _publish(pipeline, plan, symbol, item_plan, groups, *, drop_invalid_outside_regular=False):
     chunks, ranges = [], []
     for group in groups:
         paths = group.get("parts", {}).get(symbol, [])
         gap = _request({**item_plan["request"], "start": group["start"], "end": group["end"]})
         record = dict(start=group["start"], end=group["end"], status="empty", row_count=0)
         if paths:
-            frame = validate_ohlcv(_read_parts(pipeline, paths))
+            raw = _read_parts(pipeline, paths)
+            fetched = (_recover_frame(raw, plan["timeframe"]) if drop_invalid_outside_regular
+                       else FetchResult(validate_ohlcv(raw)))
+            frame = fetched.frame
             if not frame.is_empty():
                 if frame.filter((pl.col("timestamp") < gap.start) | (pl.col("timestamp") >= gap.end)).height:
                     raise ProviderError("Downloaded bars lie outside the planned request range.")
-                chunks.append((gap, FetchResult(frame)))
+                chunks.append((gap, fetched))
                 record.update(status="fetched", row_count=frame.height)
         ranges.append(record)
     if not chunks:
@@ -561,11 +673,15 @@ def _publish(pipeline, plan, symbol, item_plan, groups):
     elif plan["overlap_policy"] == "fetch_missing":
         stored = pipeline.store.merge_raw(target, chunks, supersedes=supersedes)
     elif supersedes:
-        stored = pipeline.store.refresh_raw(target, chunks[0][1].frame, supersedes=supersedes)
+        stored = pipeline.store.refresh_raw(target, chunks[0][1].frame, supersedes=supersedes,
+                                            quality=chunks[0][1].quality)
     else:
-        stored = pipeline.store.write_raw(target, chunks[0][1].frame)
+        stored = pipeline.store.write_raw(target, chunks[0][1].frame, quality=chunks[0][1].quality)
     status = "saved" if not supersedes else "merged" if plan["overlap_policy"] == "fetch_missing" else "refreshed"
     warnings = ["Some requested ranges returned no bars; only returned and existing bars were saved."] if any(row["status"] == "empty" for row in ranges) else []
+    omissions = sum(len(result.quality.omitted_bars) for _, result in chunks)
+    if omissions:
+        warnings.append(f"Recovered from local cache; omitted {omissions} invalid OHLC bar(s) outside XNYS regular sessions.")
     return _outcome(symbol, status, item_plan["request"], dataset_ids=[stored.dataset_id], row_count=stored.row_count,
         quality=json.loads(stored.to_json())["quality"], first_timestamp=stored.first_timestamp.isoformat(),
         last_timestamp=stored.last_timestamp.isoformat(), replaced_dataset_ids=supersedes,

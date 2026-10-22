@@ -1,4 +1,4 @@
-"""Session-open aligned intraday bars derived from complete one-minute inputs."""
+"""Session-open aligned intraday bars with explicit missing-minute policies."""
 
 from dataclasses import dataclass
 from datetime import timedelta
@@ -15,7 +15,7 @@ from .resampling import ResampleOHLCV, TradingSession
 
 
 class ResamplingWarning(UserWarning):
-    """Input bars excluded or incomplete intervals dropped during resampling."""
+    """Input bars excluded or missing minutes reported during resampling."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,7 +27,8 @@ class ResampleIntraday(BaseProcessor):
     Output intervals start at the session open; the final interval ends at the
     session close even when shorter than the target interval. Bars outside the
     listed sessions are excluded and reported. Missing minutes are never filled:
-    an incomplete interval raises, or is dropped with a warning. Include every
+    an incomplete interval raises, is dropped, or aggregates its available minutes
+    with a warning. Wholly empty intervals are never fabricated. Include every
     intended session in the schedule to detect wholly absent sessions, too.
     """
 
@@ -48,13 +49,13 @@ class ResampleIntraday(BaseProcessor):
         "sessions": {"title": "Trading sessions", "format": "trading_sessions", "minItems": 1,
                      "description": "Generate every intended trading session, including sessions with missing input."},
         "target_timeframe": {"title": "Output timeframe", "enum": ["30m", "1h"]},
-        "incomplete": {"title": "Incomplete intervals", "enum": ["raise", "drop"],
-                       "description": "Fail on missing minutes, or omit the entire affected output interval and report it."},
+        "incomplete": {"title": "Incomplete intervals", "enum": ["raise", "drop", "aggregate_available"],
+                       "description": "raise: fail on gaps; drop: omit affected intervals; aggregate_available: use available minutes and warn. Empty intervals stay absent; gaps are not verified as trading halts."},
     }}
 
     def __post_init__(self):
-        if self.target_timeframe not in ("30m", "1h") or self.incomplete not in ("raise", "drop"):
-            raise ProcessingError("Intraday resampling supports 30m or 1h output and incomplete='raise' or 'drop'.")
+        if self.target_timeframe not in ("30m", "1h") or self.incomplete not in ("raise", "drop", "aggregate_available"):
+            raise ProcessingError("Intraday resampling supports 30m or 1h output and incomplete='raise', 'drop' or 'aggregate_available'.")
         # Share the existing immutable schedule validation, without changing the
         # hourly-to-daily processor's behavior or introducing calendar imports.
         validated = ResampleOHLCV(self.sessions)
@@ -127,6 +128,11 @@ class ResampleIntraday(BaseProcessor):
         if frame.select((pl.col("timestamp").dt.epoch("ms") % 60_000 != 0).any()).item():
             raise ProcessingError("Input one-minute bars are off the whole-minute grid.")
 
+    def _retained_intervals(self, checked):
+        condition = (pl.col("observed_minutes") > 0 if self.incomplete == "aggregate_available"
+                     else pl.col("missing_minutes") == 0)
+        return checked.filter(condition).select("symbol", "_start")
+
     def _transform(self, frame, input_contract, output_contract):
         assigned, checked = self._assigned(frame)
         incomplete = checked.filter(pl.col("missing_minutes") != 0)
@@ -135,7 +141,18 @@ class ResampleIntraday(BaseProcessor):
                 f"{incomplete.height} incomplete intraday intervals with missing 1m bars. "
                 f"First intervals: {incomplete.select('symbol', '_start', 'missing_minutes').head(5).to_dicts()}"
             )
-        if incomplete.height:
+        if incomplete.height and self.incomplete == "aggregate_available":
+            partial = incomplete.filter(pl.col("observed_minutes") > 0)
+            empty = incomplete.filter(pl.col("observed_minutes") == 0)
+            warnings.warn(
+                f"Aggregated available minutes in {partial.height} incomplete {self.target_timeframe} intervals; "
+                f"omitted {empty.height} empty intervals ({incomplete['missing_minutes'].sum()} missing 1m bars). "
+                "No prices or volume were filled. Gap causes are unverified. "
+                "Open/close use the first/last available minute within each interval. "
+                f"First intervals: {incomplete.sort('symbol', '_start').select('symbol', '_start', 'observed_minutes', 'missing_minutes').head(5).to_dicts()}",
+                ResamplingWarning, stacklevel=2,
+            )
+        elif incomplete.height:
             warnings.warn(
                 f"Dropped {incomplete.height} incomplete {self.target_timeframe} intervals "
                 f"({incomplete['missing_minutes'].sum()} missing 1m bars). "
@@ -146,9 +163,11 @@ class ResampleIntraday(BaseProcessor):
         if excluded:
             warnings.warn(f"Excluded {excluded} one-minute bars outside the configured trading sessions.",
                           ResamplingWarning, stacklevel=2)
-        complete = checked.filter(pl.col("missing_minutes") == 0).select("symbol", "_start")
-        groups = assigned.join(complete, on=["symbol", "_start"], how="semi").sort("symbol", "timestamp")
+        retained = self._retained_intervals(checked)
+        groups = assigned.join(retained, on=["symbol", "_start"], how="semi").sort("symbol", "timestamp")
         if groups.is_empty():
+            if self.incomplete == "aggregate_available":
+                raise ProcessingError("No observed intraday intervals remain after resampling.")
             raise ProcessingError("No complete intraday intervals remain after resampling.")
         return groups.group_by("symbol", "_start").agg(
             pl.col("open").first(), pl.col("high").max(), pl.col("low").min(),
@@ -156,14 +175,14 @@ class ResampleIntraday(BaseProcessor):
         ).rename({"_start": "timestamp"}).select(CANONICAL_OHLCV_COLUMNS).sort("symbol", "timestamp")
 
     def _validate_output(self, input_frame, output_frame, input_contract, output_contract):
-        # Verify the output uses exactly the complete expected intervals. Shared
+        # Verify the output uses exactly the intervals retained by the policy. Shared
         # OHLCV validation separately enforces finite prices and valid ranges.
         assigned, checked = self._assigned(input_frame)
-        complete = checked.filter(pl.col("missing_minutes") == 0).select(
+        retained = self._retained_intervals(checked).select(
             "symbol", pl.col("_start").alias("timestamp")
         ).sort("symbol", "timestamp")
-        if not output_frame.select("symbol", "timestamp").equals(complete):
-            raise ProcessingError("Intraday output does not match the complete expected intervals.")
+        if not output_frame.select("symbol", "timestamp").equals(retained):
+            raise ProcessingError("Intraday output does not match the expected intervals for the missing-minute policy.")
         # Independently use window reductions over the source rows to check the
         # resulting OHLCV, rather than trusting the aggregation's schema alone.
         values = assigned.sort("symbol", "timestamp").with_columns(
@@ -173,7 +192,7 @@ class ResampleIntraday(BaseProcessor):
             pl.col("close").last().over("symbol", "_start").alias("close"),
             pl.col("volume").sum().over("symbol", "_start").alias("volume"),
         ).unique(["symbol", "_start"]).drop("timestamp").rename({"_start": "timestamp"})
-        expected = values.join(complete, on=["symbol", "timestamp"], how="semi").select(
+        expected = values.join(retained, on=["symbol", "timestamp"], how="semi").select(
             CANONICAL_OHLCV_COLUMNS
         ).sort("symbol", "timestamp")
         for column in ("open", "high", "low", "close", "volume"):

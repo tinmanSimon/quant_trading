@@ -76,25 +76,76 @@ files are under `<data_dir>/metadata/databento/`; they contain no API keys.
 Keep this directory to resume downloads and imports. It retains downloaded DBN
 and staging files, so disk usage exceeds the final canonical Parquet size.
 
+Failed ticker imports can also be retried entirely offline from their decoded
+cache, without an API key or another purchase:
+
+```python
+from data_pipeline import DataPipeline
+
+pipeline = DataPipeline("data")
+plan = pipeline.recover_databento(
+    saved_plan_id,
+    drop_invalid_outside_regular=True,
+)
+```
+
+This explicit option removes null/nonfinite OHLC bars only when their entire
+interval falls outside XNYS regular sessions, including holidays and early
+closes. Valid extended-hours bars remain. Invalid regular-session prices and
+other malformed data still fail validation. Omitted timestamps are recorded in
+dataset quality metadata. Successful tickers and original cached files remain
+unchanged; the saved plan's failed outcomes are replaced with recovery results.
+Missing caches or changed local coverage stop recovery without fetching data.
+Calling recovery again resumes interrupted publication or leaves already saved
+tickers alone. Ordinary **Check progress / resume** retains its existing behavior.
+
 ## Make regular-session 30-minute bars
 
 Download `1m` raw data, then open **Process data**:
 
 1. Select the Databento feed, `1m` source bars, and the tickers/batches to process.
-2. Add **Resample intraday (1m to 30m / 1h)**.
-3. Generate a session schedule using the relevant exchange calendar (normally
-   XNYS for the US stock session), spanning the full input range.
-4. Select target timeframe `30m`, preview, and save the processed data.
+2. Add **Regular hours: 1m to 30m**.
+3. Choose the first and last session dates, spanning the input range, and click
+   **Generate session schedule**. The fixed XNYS calendar supplies regular hours.
+4. Preview, then **Process and save**.
 
-The explicit schedule preserves 09:30 session starts, DST, holidays, and early
-closes. The processor removes data outside the selected sessions and reports
-that filtering. Missing minutes cause an error by default; selecting `drop`
-omits incomplete output intervals with warnings. It never synthesizes prices.
-For target `1h`, the final interval can be shorter, e.g. 15:30–16:00 on a normal
-day. Native downloaded hourly bars are not shifted or relabeled to 09:30.
+Only regular-session minutes are aggregated. Normal days produce 13 bars:
+09:30–10:00, 10:00–10:30, ..., 15:30–16:00 New York time. A 13:00 early close
+produces seven bars, ending with 12:30–13:00. Timestamps label the start of each
+bar and are stored in UTC. DST, holidays, and early closes follow the exchange
+calendar; edited schedules must still match actual regular hours.
+
+Pre-market and after-hours bars are excluded and reported. Each output bar uses
+the first open, maximum high, minimum low, last close, and summed volume. Missing
+regular-session minutes cause an error by default; selecting `drop` omits the
+entire affected 30-minute bar with a warning. It never synthesizes prices, and
+dropped intervals can still appear as missing bars in backtesting.
+
+Choose **Incomplete intervals → aggregate_available** to retain bars containing
+some missing minutes. This uses the first available open, maximum observed high,
+minimum observed low, last available close, and summed observed volume. Warnings
+report the affected interval count and missing minutes in preview and saved batch
+results. The processor does not infer that gaps are trading halts, and never fills
+prices or volume. Wholly empty intervals remain absent. If the opening minute is
+missing, the bar's open is the first later observed price, not a verified price at
+the interval start. The `raise` default and existing `drop` behavior are unchanged.
+
+For other schedules or `1h` output, the existing **Resample intraday (1m to 30m / 1h)**
+processor remains available. Native downloaded hourly bars are not shifted or
+relabeled to 09:30.
 
 Raw data is retained, and processed datasets record their source revisions and
 the exact session schedule. Select the processed layer in analysis/backtesting.
+
+The same processor is available in Python for existing raw datasets:
+
+```python
+from datetime import date
+from data_pipeline.processing import ResampleRegularHours30m
+
+processor = ResampleRegularHours30m.for_dates(date(2024, 1, 2), date(2024, 1, 31))
+processed = pipeline.process(raw_dataset_id, processors=[processor])
+```
 
 ## Python usage
 

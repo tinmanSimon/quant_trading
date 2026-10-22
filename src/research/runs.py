@@ -17,6 +17,10 @@ from .backtesting import BacktestResult, ExecutionSettings, compare_results
 from .errors import ResearchError
 
 
+_REQUIRED_TABLES = ("equity", "trades", "orders")
+_OPTIONAL_TABLES = ("completed_trades", "open_positions", "factor_values", "rebalances", "targets", "positions")
+
+
 @dataclass(frozen=True)
 class ResearchRun:
     run_id: str
@@ -71,9 +75,9 @@ def save_run(root: Path, results: list[BacktestResult], manifest: dict) -> Resea
             entry = {"symbol": result.symbol, "strategy_spec": result.strategy_spec,
                      "settings": result.settings.to_dict(), "metrics": result.metrics,
                      "metadata": result.metadata, "files": {}}
-            for name in ("equity", "trades", "orders", "completed_trades", "open_positions"):
+            for name in _REQUIRED_TABLES + _OPTIONAL_TABLES:
                 frame = getattr(result, name)
-                if name in ("completed_trades", "open_positions") and frame.width == 0:
+                if name in _OPTIONAL_TABLES and frame.width == 0:
                     continue
                 path = staging / f"{index}-{name}.parquet"
                 frame.write_parquet(path)
@@ -129,8 +133,8 @@ def load_run(root: Path, run_id: str) -> ResearchRun:
     results = []
     for entry in document["results"]:
         frames = {}
-        for name in ("equity", "trades", "orders", "completed_trades", "open_positions"):
-            if name in ("completed_trades", "open_positions") and name not in entry["files"]:
+        for name in _REQUIRED_TABLES + _OPTIONAL_TABLES:
+            if name in _OPTIONAL_TABLES and name not in entry["files"]:
                 continue
             item = entry["files"][name]
             artifact = path / item["path"]
@@ -172,6 +176,11 @@ def comparison_identity(manifest: dict) -> dict:
             "execution_settings", "engine_sha256")
     result = {key: manifest[key] for key in keys}
     result["trading_period"] = manifest.get("trading_period", "regular")
+    result["flow"] = manifest.get("flow", "strategy")
+    if result["flow"] == "factor":
+        # Policies and factor configurations are the experiment variables. The
+        # fill/funding assumptions must still agree for a fair comparison.
+        result["factor_execution"] = manifest.get("factor_execution", {})
     result["allocation_mode"] = manifest.get("allocation_mode", "per_entry")
     if result["allocation_mode"] == "fixed_tenth":
         result["entry_percentage"] = format(Decimal(str(manifest.get("entry_percentage", 10))).normalize(), "f")

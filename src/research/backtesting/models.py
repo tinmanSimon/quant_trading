@@ -74,3 +74,9 @@ class BacktestResult:
     metadata: dict = field(default_factory=dict)
     completed_trades: pl.DataFrame = field(default_factory=pl.DataFrame)
     open_positions: pl.DataFrame = field(default_factory=pl.DataFrame)
+    # Factor portfolios retain their decisions separately from actual fills.
+    # Empty defaults preserve the existing strategy result/storage contract.
+    factor_values: pl.DataFrame = field(default_factory=pl.DataFrame)
+    rebalances: pl.DataFrame = field(default_factory=pl.DataFrame)
+    targets: pl.DataFrame = field(default_factory=pl.DataFrame)
+    positions: pl.DataFrame = field(default_factory=pl.DataFrame)
