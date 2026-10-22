@@ -855,7 +855,8 @@ combined reports. Old recorded omissions do not override a bar now present.
 
 Allocation strategies give each strategy/ticker pair its own cash account.
 Stop/target strategies support the capital allocation modes described below.
-Neither mode allows leverage or short selling. The dashboard enables fractional
+Allocation strategies remain long-only; stop/target strategies can opt into
+short entries as described below. The dashboard enables fractional
 shares by default; API execution settings retain whole shares unless requested.
 At each completed bar, the strategy returns a target allocation in `[0, 1]`.
 That target is rebalanced at the next available scheduled bar's open using
@@ -863,7 +864,8 @@ that open's price plus configured adverse slippage. Fees and price gaps are
 included in affordability calculations; buys are reduced or rejected when
 needed. Rejections are recorded. Zero-volume bars cannot execute orders.
 The exact cash ledger uses Decimal arithmetic, fees round upward to eight
-decimal places, and cash/holdings/equity must stay nonnegative. Float columns
+decimal places. Long-only cash/holdings/equity stay nonnegative; short losses can
+exceed reserved collateral. Float columns
 are for plotting; `*_exact` columns preserve ledger values.
 
 Strategies receive isolated history containing only completed preceding bars.
@@ -898,21 +900,21 @@ selects one of three modes:
   to 5, 7, 10 (the default), or another percentage. Each signal gets that percentage
   of the original capital, including fees and slippage. Skip the signal if
   available cash cannot cover the full budget. Later signals may use replenished
-  sale proceeds; skipped signals are not queued. Simultaneous signals are handled
+  cash released by exits; skipped signals are not queued. Simultaneous signals are handled
   in ascending ticker order. This mode requires stop/target strategies and runs
   sequentially (`allocation_mode="fixed_tenth", entry_percentage=7` in Python;
   `--entry-percentage 7` in the CLI).
 - **Split once at start:** divide total initial capital equally among the usable
-  tickers. Each ticker retains its own cash and sale proceeds throughout the run.
+  tickers. Each ticker retains its own cash and profits throughout the run.
   Independent ticker simulations can run in parallel using **Parallel workers**.
   A late-starting ticker's allocation remains idle until its warm-up completes.
   The report includes a combined summary per strategy and individual ticker details.
 
-Both modes include fees and slippage in purchase budgets and leave existing
+All modes include entry costs in their budgets and leave existing
 holdings unchanged. **Allow fractional shares** is enabled by default in the
-dashboard: purchases need a budget of at least $5, with quantities rounded down
-to eight decimal places. This is a minimum purchase budget, not a $5 cash reserve.
-Complete sales can be smaller than $5. Exact quantity and cash strings are saved
+dashboard: entries need a budget of at least $5, with quantities rounded down
+to eight decimal places. This is a minimum entry budget, not a $5 cash reserve.
+Complete exits can be smaller than $5. Exact quantity and cash strings are saved
 alongside display values. Python callers enable this with
 `ExecutionSettings(fractional_shares=True)`.
 
@@ -955,10 +957,30 @@ future rows must never change earlier decisions. The engine enters using row i-1
 at row i's open. Strategies without this optional method keep the existing
 completed-history `entry_signal` interface.
 
+The private SMA/RSI strategy has an **Enable short selling** option, off by default
+(`enable_shorts=True` in its configuration). A short signal requires the current
+SMA to be below either of the preceding two SMA values and RSI to cross strictly
+from above 50 to below 50. The existing long signal is unchanged. The short opens
+at the next bar's open, with target `entry_open / win_percentage` and stop
+`entry_open / stop_percentage`. A low strictly below the target wins; a high
+strictly above the stop loses. Crossing both thresholds is an inconclusive stop.
+Only one position per ticker can be open at a time, in either direction.
+
+Short entries use the selected allocation mode and reserve the raw entry
+notional plus entry fees from available cash. Sale proceeds stay locked until
+the position is bought back, so they cannot fund additional entries. Sell fills
+receive downward slippage and buybacks upward slippage. Equity includes reserved
+collateral, locked proceeds, and the current buyback liability. A forced buyback
+honors losses even when they exceed collateral; negative cash blocks new entries
+until funds recover. Borrow availability, borrow fees, and maintenance-margin
+calls are not modeled. Short-capable bracket strategies implement
+`short_entry_signal(history)` and may also provide
+`prepare_short_entry_signals(history)` under the same causality rules.
+
 Entry decisions use completed bars and execute at the following open. Fixed
 stop and target multipliers use that entry bar's raw open. Exit checks include
 the entry bar and require strict high/low crossings; touching a threshold does
-not exit. Crossing both thresholds records an inconclusive stop and sells at
+not exit. Crossing both thresholds records an inconclusive stop and closes at
 the modeled stop price. Exits use threshold prices with configured adverse
 slippage, including across gaps; this is a simplified fill assumption. Their
 exact intrabar time is unknown, so proceeds become available at bar close.
@@ -968,7 +990,7 @@ The report includes wins, losses, inconclusive stops, completed-trade details,
 open positions, and realized/unrealized/total P&L after costs. Unresolved positions
 are valued at their final close. Details record bar positions within the loaded
 history (including warm-up), timestamps, allocations, quantities, thresholds,
-prices and costs. These tables survive saving and reopening. Stop/target
+prices, costs, and long/short direction. These tables survive saving and reopening. Stop/target
 strategies cannot be included in weighted allocation combinations.
 
 ### Strategies, results and reproducibility

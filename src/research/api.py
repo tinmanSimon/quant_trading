@@ -122,7 +122,10 @@ class Research:
             manifest["account_mode"] = "initial_capital_split_among_independent_ticker_accounts"
             manifest["allocation_summary"] = summarize_initial_split(results)
         elif portfolio_workers:
+            short_enabled = any(result.metadata.get("account_model", "").startswith("shared_cash_long_short")
+                                for result in results)
             manifest["account_mode"] = ("mixed_independent_and_shared_usd_accounts" if independent_workers
+                                        else "shared_long_short_usd_portfolios" if short_enabled
                                         else "shared_long_only_usd_portfolios")
         manifest["execution_settings"] = settings.to_dict()
         manifest["strategies"] = [strategy_spec(worker) for worker in workers]

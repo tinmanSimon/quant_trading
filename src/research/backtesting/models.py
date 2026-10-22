@@ -1,4 +1,4 @@
-"""Configuration and outputs of long-only account simulations."""
+"""Configuration and outputs of account simulations."""
 
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -18,10 +18,11 @@ def as_decimal(value, name: str) -> Decimal:
 
 @dataclass(frozen=True, slots=True)
 class ExecutionSettings:
-    """No borrowing, no shorts, entries at the next bar open.
+    """Execution costs and sizing, with entries at the next bar open.
 
     Allocation strategies also exit at the next open; bracket strategies use
-    their fixed intrabar stop/target execution rules.
+    their fixed intrabar stop/target execution rules. Bracket strategies may
+    optionally short using reserved collateral and restricted sale proceeds.
 
     Whole shares are the default; fractional shares round down to 8 decimal
     places and require the configured minimum purchase budget (including fees).

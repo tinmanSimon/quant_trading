@@ -80,8 +80,10 @@ def _run_ticker(task):
         result.symbol = symbol
     else:
         result = run_backtest(frame, strategy, start=start, end=end, settings=settings, bar_times=times)
+    short_enabled = result.metadata.get("account_model", "").startswith("shared_cash_long_short")
     result.metadata.update(
-        account_model="initial_split_long_only", allocation_mode="initial_split",
+        account_model="initial_split_long_short" if short_enabled else "initial_split_long_only",
+        allocation_mode="initial_split",
         allocation="equal_initial_capital_per_ticker_no_transfers", strategy_index=strategy_index,
         portfolio_initial_cash_exact=str(total), unallocated_cash_exact=str(remainder),
     )

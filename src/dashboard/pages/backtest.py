@@ -14,6 +14,13 @@ from research import PreflightError, Research, ResearchError
 from research.backtesting import ExecutionSettings
 from research.timeframes import BACKTEST_TIMEFRAMES, INTRADAY_DURATIONS
 
+
+def _short_account_caption():
+    return ("Short entries reserve their entry notional and fees from available cash; sale proceeds stay locked until buyback. "
+            "Borrow availability, borrow fees, and maintenance margin are not modeled. "
+            "Losses can exceed the reserved amount and block new entries until cash recovers.")
+
+
 def _show_result(run, *, ui=st):
     st = ui
     st.subheader(f"Run {run.run_id}")
@@ -31,7 +38,9 @@ def _show_result(run, *, ui=st):
     if run.manifest.get("price_basis") == "processed_transformed_prices":
         st.info("This run executes at transformed prices. Cash, trade sizes, and account values use those transformed price units.")
     portfolio_results = [result for result in run.results
-                         if result.metadata.get("account_model", "").startswith("shared_cash_long_only")]
+                         if result.metadata.get("account_model", "").startswith("shared_cash_long_")]
+    if any("long_short" in result.metadata.get("account_model", "") for result in run.results):
+        st.caption(_short_account_caption())
     initial_split = run.manifest.get("allocation_mode") == "initial_split"
     if initial_split:
         st.caption("Each strategy splits its total initial capital equally across tickers once. "
@@ -74,10 +83,10 @@ def _show_result(run, *, ui=st):
     result = run.results[selected]
     if "wins" in result.metrics:
         if initial_split:
-            st.caption("This ticker trades only its initial allocation and its own subsequent sale proceeds.")
+            st.caption("This ticker trades only its initial allocation and cash released by its own closed positions.")
         elif run.manifest.get("allocation_mode") == "fixed_tenth":
             st.caption(f"Each entry budgets {run.manifest.get('entry_percentage', '10')}% of initial capital, including costs. Unfunded signals are skipped; "
-                       "later signals can trade after sales replenish cash. Simultaneous entries use ticker order.")
+                       "later signals can trade after exits replenish cash. Simultaneous entries use ticker order.")
         else:
             st.caption("Entry budget = available cash ÷ eligible tickers not currently held. "
                        "Same-open entries use the same cash snapshot; existing holdings are not rebalanced.")
@@ -89,7 +98,7 @@ def _show_result(run, *, ui=st):
         for column, label, key in zip(profits, ("Realized P&L", "Unrealized P&L", "Total P&L"),
                                       ("realized_pnl", "unrealized_pnl", "total_pnl")):
             column.metric(label, f"${result.metrics[key]:,.2f}")
-        st.caption("Inconclusive stops are counted separately and sold at the modeled stop price. "
+        st.caption("Inconclusive stops are counted separately and closed at the modeled stop price. "
                    "P&L includes commissions and slippage. Open positions are valued at their final close.")
     equity = result.equity
     # A closing valuation is known at the bar's close, not at its source
@@ -206,6 +215,8 @@ def _render_backtest_page(research: Research, memory):
         st.session_state.pop("backtest-run", None)
         st.session_state["backtest-source-identity"] = source_identity
     specs = strategy_specs(registry, memory=memory)
+    if specs and any(spec.get("config", {}).get("enable_shorts") is True for spec in specs):
+        st.caption(_short_account_caption())
     st.caption("Strategy lookbacks count bars at the selected interval. Download history before the test start; "
                "preflight checks the longest selected requirement for every ticker.")
     st.caption("After changing private strategy Python files, restart the dashboard to load the new code.")
@@ -234,14 +245,14 @@ def _render_backtest_page(research: Research, memory):
                    "Each ticker keeps its own cash and profits, so tickers can run in parallel.")
     elif allocation_mode == "fixed_tenth":
         st.caption(f"Stop/target strategies budget {entry_percentage:g}% of initial capital per entry, including fees and slippage. "
-                   "Skip signals when cash cannot cover the full allocation; later signals can use sale proceeds. "
+                   "Skip signals when cash cannot cover the full allocation; later signals can use cash released by exits. "
                    "Simultaneous signals are considered in ticker order. Shared cash runs sequentially.")
     else:
         st.caption("Stop/target strategies use this initial cash once across all selected tickers, allocating free cash at each entry. "
                    "Other strategies retain a separate full-size account for each ticker. Shared cash runs sequentially.")
     fractional_shares = memory.widget(st.checkbox, "Allow fractional shares", value=True,
                                       key="backtest-fractional-shares",
-                                      help="New purchases need at least a $5 budget, including fees. No $5 cash reserve is required.")
+                                      help="New entries need at least a $5 budget, including fees. No $5 cash reserve is required.")
     first, second, third = st.columns(3)
     fixed = memory.widget(first.number_input, "Fixed commission per trade", min_value=0.0, value=0.0,
                           key="backtest-commission-fixed")
