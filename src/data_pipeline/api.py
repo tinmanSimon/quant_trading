@@ -38,6 +38,49 @@ class DataPipeline:
                           massive_request_interval_seconds=massive_request_interval_seconds,
                           overlap_policy=overlap_policy, progress=progress)
 
+    def estimate_databento(self, tickers, *, start: datetime, end: datetime,
+                           dataset: str, timeframe="1m", overlap_policy="fetch_missing",
+                           max_estimated_cost=None) -> dict:
+        """Estimate and persist an explicit multi-symbol download; never submit it."""
+        from .databento_batch import estimate
+
+        return estimate(self, tickers, start=start, end=end, dataset=dataset,
+                        timeframe=timeframe, overlap_policy=overlap_policy,
+                        max_estimated_cost=max_estimated_cost)
+
+    def advance_databento(self, plan_id: str, *, submit=False, progress=None) -> dict:
+        """Advance one saved job stage, optionally reporting download bytes/files.
+
+        ``submit=True`` authorizes the reviewed plan. The progress callback runs
+        on the calling thread and never authorizes or creates a replacement job.
+        Its dict contains downloaded_bytes, total_bytes, completed_files, and
+        total_files for the current job, including previously cached files.
+        """
+        from .databento_batch import advance
+
+        return advance(self, plan_id, submit=submit, progress=progress)
+
+    def databento_plan(self, plan_id: str) -> dict:
+        from .databento_batch import load_plan
+
+        return load_plan(self, plan_id)
+
+    def databento_plans(self) -> list[dict]:
+        from .databento_batch import list_plans
+
+        return list_plans(self)
+
+    def databento_report(self, plan_id: str) -> BatchFetchReport:
+        from .databento_batch import report_from_plan
+
+        return report_from_plan(self.databento_plan(plan_id))
+
+    def reconcile_databento_job(self, plan_id: str, group_id: str, job_id: str) -> dict:
+        """Attach a verified existing job after an uncertain submit; never resubmit."""
+        from .databento_batch import reconcile_job
+
+        return reconcile_job(self, plan_id, group_id, job_id)
+
     def ingest(
         self, request: DataRequest, *, processors: Pipeline | Iterable[Processor] = (),
     ) -> IngestionResult:

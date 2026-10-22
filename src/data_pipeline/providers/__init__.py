@@ -4,9 +4,11 @@ from .base import BaseDataProvider
 from .registry import ProviderEntry, ProviderFactory, ProviderRegistry
 from .yahoo import YFinanceProvider
 from .massive import MassiveProvider
+from .databento import DatabentoProvider
 
 
-registry = ProviderRegistry({"yahoo": YFinanceProvider, "massive": MassiveProvider})
+registry = ProviderRegistry({"yahoo": YFinanceProvider, "massive": MassiveProvider,
+                             "databento": DatabentoProvider})
 """Default registry; providers are constructed lazily when requested."""
 
 
@@ -29,6 +31,7 @@ __all__ = [
     "ProviderRegistry",
     "YFinanceProvider",
     "MassiveProvider",
+    "DatabentoProvider",
     "get_provider",
     "register_provider",
     "registry",

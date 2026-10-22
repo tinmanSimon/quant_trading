@@ -27,7 +27,8 @@ def _sessions(label, schema, value, memory, key, bounds):
 
     st.markdown(f"**{label}**")
     st.caption("Generate an explicit exchange schedule, or edit its JSON. Bars must match the supplied "
-               "session grid; out-of-session bars are rejected. The schedule is saved with the pipeline.")
+               "session grid; each processor describes how it handles out-of-session input. "
+               "The schedule is saved with the pipeline.")
     mode = memory.widget(st.radio, "Session hours", options=[REGULAR_HOURS, CUSTOM_HOURS],
                          key=key + "-mode", horizontal=True)
     first, last = bounds or (date.today(), date.today())

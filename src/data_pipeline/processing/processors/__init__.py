@@ -3,5 +3,6 @@
 from .base import BaseProcessor
 from .scaling import ScalePrices
 from .resampling import ResampleOHLCV, TradingSession
+from .intraday import ResampleIntraday
 
-__all__ = ["BaseProcessor", "ScalePrices", "ResampleOHLCV", "TradingSession"]
+__all__ = ["BaseProcessor", "ScalePrices", "ResampleOHLCV", "ResampleIntraday", "TradingSession"]

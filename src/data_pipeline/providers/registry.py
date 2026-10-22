@@ -44,6 +44,13 @@ class ProviderRegistry:
         try:
             entry = self._providers[key]
         except KeyError as exc:
+            # A stored Databento feed must remain addressable after restart.
+            # Only a registered generic adapter enables this narrow namespace.
+            if key.startswith("databento-") and "databento" in self._providers:
+                from .databento import DatabentoProvider
+                provider = self.get("databento")
+                if isinstance(provider, DatabentoProvider):
+                    return provider.with_dataset(key.removeprefix("databento-"))
             raise UnknownProviderError(f"Unknown provider {key!r}.") from exc
         if isinstance(entry, BaseDataProvider):
             return entry

@@ -4,12 +4,14 @@ from datetime import time, timedelta
 import json
 from pathlib import Path
 from uuid import uuid4
+import warnings
 
 import streamlit as st
 
 from data_pipeline import DataQuery
 from data_pipeline.exceptions import DataAlreadyExistsError
 from data_pipeline.processing import discover_processors
+from data_pipeline.processing.processors.intraday import ResamplingWarning
 from dashboard.components.schema_controls import processor_controls
 from dashboard.state.workspace import market_memory
 
@@ -207,10 +209,13 @@ def _render_processing(research, memory):
             for symbol, ids in groups.items():
                 try:
                     parents, source = research.pipeline.store.read_raw_inputs(ids)
-                    output = pipeline.run(source, parents[0].contract)
+                    with warnings.catch_warnings(record=True) as captured:
+                        warnings.simplefilter("always", ResamplingWarning)
+                        output = pipeline.run(source, parents[0].contract)
                     results.append({"symbol": symbol, "input_rows": source.height, "output_rows": output.frame.height,
                                     "input_timeframe": parents[0].contract.timeframe,
                                     "output_timeframe": output.contract.timeframe,
+                                    "warnings": list(dict.fromkeys(str(item.message) for item in captured)),
                                     "before": source.head(100), "after": output.frame.head(100)})
                 except Exception as error:
                     results.append({"symbol": symbol, "error": str(error)})
@@ -225,6 +230,8 @@ def _render_processing(research, memory):
                 st.error(result["error"])
                 continue
             st.write(f"{result['input_rows']:,} {result['input_timeframe']} bars → {result['output_rows']:,} {result['output_timeframe']} bars")
+            for warning in result.get("warnings", []):
+                st.warning(warning)
             before, after = st.columns(2)
             before.caption("Raw input")
             before.dataframe(result["before"], hide_index=True)
@@ -236,17 +243,20 @@ def _render_processing(research, memory):
             for symbol, ids in groups.items():
                 try:
                     status = "Saved"
-                    try:
-                        output = research.pipeline.process(ids, processors=pipeline)
-                    except DataAlreadyExistsError:
-                        matches = [item for item in research.pipeline.list_datasets(DataQuery(layer="processed", pipeline_id=pipeline.fingerprint))
-                                   if set(item.parent_ids) == set(ids)]
-                        if len(matches) != 1:
-                            raise
-                        output = matches[0]
-                        research.pipeline.read_dataset(output.dataset_id)
-                        status = "Already processed"
-                    report.append({"symbol": symbol, "status": status, "dataset_id": output.dataset_id, "rows": output.row_count})
+                    with warnings.catch_warnings(record=True) as captured:
+                        warnings.simplefilter("always", ResamplingWarning)
+                        try:
+                            output = research.pipeline.process(ids, processors=pipeline)
+                        except DataAlreadyExistsError:
+                            matches = [item for item in research.pipeline.list_datasets(DataQuery(layer="processed", pipeline_id=pipeline.fingerprint))
+                                       if set(item.parent_ids) == set(ids)]
+                            if len(matches) != 1:
+                                raise
+                            output = matches[0]
+                            research.pipeline.read_dataset(output.dataset_id)
+                            status = "Already processed"
+                    report.append({"symbol": symbol, "status": status, "dataset_id": output.dataset_id, "rows": output.row_count,
+                                   "warnings": list(dict.fromkeys(str(item.message) for item in captured))})
                 except Exception as error:
                     report.append({"symbol": symbol, "status": "Failed", "error": str(error)})
         memory.values["report"] = report
@@ -259,6 +269,8 @@ def _render_processing(research, memory):
                 st.error(f"{row['symbol']}: {row['error']}")
             else:
                 st.success(f"{row['symbol']}: {row['status']} · {row['rows']:,} rows · {row['dataset_id'][:12]}")
+            for warning in row.get("warnings", []):
+                st.warning(f"{row['symbol']}: {warning}")
         active = {item.dataset_id for item in research.pipeline.list_datasets(DataQuery(layer="processed"))}
         outputs = [row for row in report if row.get("dataset_id") in active]
         if outputs:

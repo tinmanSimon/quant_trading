@@ -2,7 +2,7 @@
 
 An OHLCV ingestion package with interchangeable providers, local raw/processed
 Parquet storage, ordered processors, revision history, and a Python/CLI query API.
-Yahoo Finance and Massive (formerly Polygon.io) are the included vendor adapters.
+Yahoo Finance, Massive (formerly Polygon.io), and Databento are the included vendor adapters.
 
 The `data_pipeline` package also handles batch fetching and per-ticker outcomes.
 The `research` package adds strict local-data preflight,
@@ -1245,6 +1245,26 @@ Yahoo symbols are canonicalized to uppercase, so `aapl` and `AAPL` share one
 storage identity and cannot bypass overlap protection. Other providers retain
 case-sensitive instrument identifiers. Local symbol queries apply Yahoo's
 case normalization even when the provider filter is omitted.
+
+## Fetch from Databento
+
+Install the updated `requirements.txt` and set `DATABENTO_API_KEY` locally before
+launching the dashboard. The SDK and credentials are needed only when contacting
+Databento; constructing the pipeline and browsing saved data work without them.
+
+Select **Databento** on the Fetch page and explicitly choose a dataset. Review
+the estimate before submitting a download. Hundreds of tickers can share one
+server-side batch job; saved jobs can be resumed after restarting the dashboard.
+See [the Databento workflow](docs/databento.md) for estimates, resumable jobs,
+per-ticker reports, and conversion of minute bars into 09:30-aligned 30m bars.
+
+Native downloads support `1m` and `1h` unadjusted OHLCV. Feeds have separate
+storage namespaces, such as `databento-xnas.itch` and `databento-equs.mini`;
+selecting a dataset never substitutes another feed. The official SDK maps
+instrument identifiers by date and scales fixed-point prices. Missing bars are
+not filled and historical ticker changes are not stitched automatically.
+Different datasets cover different venues: compare their coverage before
+comparing opens, highs, or analysis results.
 
 ## Fetch from Massive
 

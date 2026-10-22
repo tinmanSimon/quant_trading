@@ -13,6 +13,10 @@ def _fetch_page(research: Research):
     if provider is None:
         return
     adapter = research.pipeline.providers.get(provider)
+    if provider == "databento" or provider.startswith("databento-"):
+        from dashboard.pages.databento_fetch import databento_fetch_page
+        databento_fetch_page(research, adapter)
+        return
     intervals = fetch_timeframes(adapter.supported_timeframes)
     if not intervals:
         st.warning("This provider declares no fetch intervals supported by the dashboard.")
