@@ -175,6 +175,7 @@ def comparison_identity(manifest: dict) -> dict:
             "instruments", "calendar_version", "price_basis", "return_basis", "account_mode",
             "execution_settings", "engine_sha256")
     result = {key: manifest[key] for key in keys}
+    result["research_mode"] = manifest.get("research_mode", "strict")
     result["trading_period"] = manifest.get("trading_period", "regular")
     result["flow"] = manifest.get("flow", "strategy")
     if result["flow"] == "factor":
@@ -182,6 +183,8 @@ def comparison_identity(manifest: dict) -> dict:
         # fill/funding assumptions must still agree for a fair comparison.
         result["factor_execution"] = manifest.get("factor_execution", {})
     result["allocation_mode"] = manifest.get("allocation_mode", "per_entry")
+    if result["allocation_mode"] == "holding_slots":
+        result["initial_available_holdings"] = manifest["initial_available_holdings"]
     if result["allocation_mode"] == "fixed_tenth":
         result["entry_percentage"] = format(Decimal(str(manifest.get("entry_percentage", 10))).normalize(), "f")
     result["skip_initial_missing_bars"] = manifest.get("skip_initial_missing_bars", False)

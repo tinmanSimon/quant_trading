@@ -24,8 +24,8 @@ _SPAWN_LOCK = Lock()
 
 
 def validate_allocation_options(allocation_mode, max_workers):
-    if allocation_mode not in ("per_entry", "initial_split", "fixed_tenth"):
-        raise ValueError("allocation_mode must be 'per_entry', 'initial_split', or 'fixed_tenth'.")
+    if allocation_mode not in ("per_entry", "initial_split", "fixed_tenth", "holding_slots"):
+        raise ValueError("allocation_mode must be 'per_entry', 'initial_split', 'fixed_tenth', or 'holding_slots'.")
     if type(max_workers) is not int or not 1 <= max_workers <= MAX_WORKERS:
         raise ValueError(f"max_workers must be an integer from 1 to {MAX_WORKERS}.")
 

@@ -13,6 +13,7 @@ from data_pipeline import DataPipeline, DataQuery, DataRequest, validate_ohlcv
 
 from .errors import PreflightError, ResearchError
 from .instruments import ExpectedBar, Instrument, expected_bars
+from .modes import ADJUSTED_PRICE_NOTE, ADJUSTED_RETURN_BASIS, validate_research_mode
 from .processed import validate_processed_source
 
 
@@ -69,14 +70,16 @@ def prepare_snapshot(pipeline: DataPipeline, *, tickers, start: datetime, end: d
                      pipeline_id: str | None = None,
                      skip_initial_missing_bars: bool = False,
                      skip_problematic_tickers: bool = False,
-                     trading_period: str = "regular") -> DatasetSnapshot:
+                     trading_period: str = "regular",
+                     research_mode: str = "strict") -> DatasetSnapshot:
+    validate_research_mode(research_mode, layer=layer)
     if type(skip_initial_missing_bars) is not bool:
         raise ResearchError("skip_initial_missing_bars must be a boolean.")
     if type(skip_problematic_tickers) is not bool:
         raise ResearchError("skip_problematic_tickers must be a boolean.")
     symbols = normalize_tickers(tickers, provider=provider, start=start, end=end, timeframe=timeframe)
     if layer == "processed" and pipeline_id is None:
-        raise ResearchError("Processed backtests require an explicit pipeline_id and registered processors with a causality guarantee.")
+        raise ResearchError("Processed backtests require an explicit pipeline_id and registered processors that meet the selected research mode's causality policy.")
     if layer == "raw" and pipeline_id is not None:
         raise ResearchError("Raw backtests must not specify pipeline_id.")
     query = DataQuery(provider=provider, start=start, end=end, timeframe=timeframe,
@@ -106,8 +109,12 @@ def prepare_snapshot(pipeline: DataPipeline, *, tickers, start: datetime, end: d
     effective_starts, skipped_tickers = {}, {}
     parent_sources, parent_cache = {}, {}
     processor_specs = None
+    adjustment_metadata = None
     price_basis = "vendor_unadjusted"
     issues, notes = [], []
+    if research_mode == "adjusted_price":
+        notes.append(ADJUSTED_PRICE_NOTE)
+        warnings.append({"ticker": "", "code": "adjusted_price_research", "message": ADJUSTED_PRICE_NOTE})
     for symbol in symbols:
         try:
             instrument = (instruments or {}).get(symbol, Instrument(symbol, calendar))
@@ -157,10 +164,13 @@ def prepare_snapshot(pipeline: DataPipeline, *, tickers, start: datetime, end: d
                     specs, parents, basis = validate_processed_source(
                         pipeline, item, pipeline_id=pipeline_id, registry=registry,
                         bars=bars, parent_cache=parent_cache,
+                        research_mode=research_mode,
                     )
                     if processor_specs is not None and (specs != processor_specs or basis != price_basis):
                         raise ResearchError("Cannot combine different processed pipeline specifications or price bases.")
                     processor_specs, price_basis = specs, basis
+                    if research_mode == "adjusted_price":
+                        adjustment_metadata = json.loads(item.contract.adjustment_json)
                     selected_parents.update({parent.dataset_id: parent for parent in parents})
             frame = pl.concat([pipeline.read_dataset(item.dataset_id) for item in items]).sort("symbol", "timestamp")
             frame = frame.filter(
@@ -247,11 +257,15 @@ def prepare_snapshot(pipeline: DataPipeline, *, tickers, start: datetime, end: d
         "start": start.isoformat(), "end": end.isoformat(),
         "lookback": lookback, "as_of": as_of.isoformat(), "sources": sources,
         "instruments": instrument_specs, "calendar_version": xcals.__version__,
-        "price_basis": price_basis, "return_basis": "price_return_no_dividend_credit",
+        "research_mode": research_mode, "price_basis": price_basis,
+        "return_basis": (ADJUSTED_RETURN_BASIS if research_mode == "adjusted_price"
+                         else "price_return_no_dividend_credit"),
         "account_mode": "independent_long_only_usd_accounts", "notes": list(notes),
     }
     if layer == "processed":
         manifest.update(pipeline_id=pipeline_id, processors=processor_specs, parent_sources=parent_sources)
+    if research_mode == "adjusted_price":
+        manifest["corporate_action_adjustment"] = adjustment_metadata
     if skip_initial_missing_bars or skip_problematic_tickers:
         manifest.update(skip_initial_missing_bars=skip_initial_missing_bars, requested_tickers=list(symbols),
                         effective_starts={symbol: stamp.isoformat() for symbol, stamp in effective_starts.items()},

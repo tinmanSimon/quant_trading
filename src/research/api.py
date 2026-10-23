@@ -11,7 +11,7 @@ from data_pipeline import DataPipeline
 
 from .backtesting import ExecutionSettings, run_backtest, run_portfolio_backtest
 from .backtesting.initial_split import run_initial_split_backtests, summarize_initial_split, validate_allocation_options
-from .backtesting.portfolio import validate_entry_percentage
+from .backtesting.portfolio import DEFAULT_HOLDING_SLOTS, validate_entry_percentage, validate_holding_slots
 from .datasets import normalize_tickers, prepare_snapshot
 from .errors import PreflightError, ResearchError
 from .instruments import Instrument
@@ -37,6 +37,43 @@ _RETROSPECTIVE_EXCLUSION = {
     "message": "Skipping problematic tickers removes them from the entire test using full-period data checks. "
                "A later data problem can therefore change earlier portfolio decisions and introduce selection bias.",
 }
+
+
+def _price_assumptions(manifest: dict) -> dict:
+    """Describe the units actually traded, without inventing a cash-action ledger."""
+    adjusted = manifest.get("research_mode", "strict") == "adjusted_price"
+    return {
+        "research_mode": manifest.get("research_mode", "strict"),
+        "price_basis": manifest["price_basis"],
+        "return_basis": manifest["return_basis"],
+        "corporate_actions": (
+            "Historical splits and cash dividends are reflected in the processed price series. "
+            "No additional corporate-action position accounting; other event types remain unadjusted."
+            if adjusted else "No automatic split adjustment or corporate-action position accounting."
+        ),
+        "dividends": (
+            "Reflected in adjusted prices and returns; no additional dividend cash credit."
+            if adjusted else "Excluded from cash and returns."
+        ),
+        **({"execution_units": "Prices, share quantities, whole-share rounding and per-share fees use "
+                                  "adjusted units, not historical quoted prices or share counts."}
+           if adjusted else {}),
+    }
+
+
+def _set_result_price_metadata(result, manifest: dict, assumptions: dict) -> None:
+    result.metadata.update(
+        layer=manifest["layer"], price_basis=manifest["price_basis"],
+        return_basis=manifest["return_basis"], research_mode=manifest.get("research_mode", "strict"),
+        assumptions=assumptions,
+    )
+    if manifest.get("research_mode", "strict") == "adjusted_price":
+        # Execution engines have no dividend ledger. Their default "excluded"
+        # label must not misdescribe dividend-adjusted input returns.
+        result.metadata["dividends"] = "reflected_in_adjusted_prices_no_additional_cash_credit"
+        result.metrics["return_basis"] = manifest["return_basis"]
+    if manifest["layer"] == "processed":
+        result.metadata["pipeline_id"] = manifest["pipeline_id"]
 
 
 class Research:
@@ -75,12 +112,13 @@ class Research:
 
     def preflight(self, tickers, *, strategies, start, end, timeframe="1d", provider="yahoo",
                   calendar="XNYS", as_of=None, layer="raw", pipeline_id=None,
-                  skip_initial_missing_bars=False, skip_problematic_tickers=False, trading_period="regular"):
+                  skip_initial_missing_bars=False, skip_problematic_tickers=False, trading_period="regular",
+                  research_mode="strict"):
         workers = self._strategies(strategies)
         try:
             return self._snapshot(tickers, workers, start=start, end=end, timeframe=timeframe,
                                   provider=provider, calendar=calendar, as_of=as_of,
-                                  layer=layer, pipeline_id=pipeline_id,
+                                  layer=layer, pipeline_id=pipeline_id, research_mode=research_mode,
                                   skip_initial_missing_bars=skip_initial_missing_bars,
                                   skip_problematic_tickers=skip_problematic_tickers, trading_period=trading_period).report
         except PreflightError as exc:
@@ -128,7 +166,8 @@ class Research:
     def factor_preflight(self, tickers, *, spec, start, end, timeframe="1d", provider="yahoo",
                          calendar="XNYS", as_of=None, layer="raw", pipeline_id=None,
                          skip_initial_missing_bars=False, skip_problematic_tickers=False,
-                         trading_period="regular", factor_registry=None, portfolio_registry=None):
+                         trading_period="regular", factor_registry=None, portfolio_registry=None,
+                         research_mode="strict"):
         """Validate a factor experiment against pinned local, completed bars.
 
         No factors or portfolio decisions run during preflight. The optional
@@ -139,7 +178,7 @@ class Research:
         try:
             report = self._factor_snapshot(
                 tickers, spec, start=start, end=end, timeframe=timeframe, provider=provider,
-                calendar=calendar, as_of=as_of, layer=layer, pipeline_id=pipeline_id,
+                calendar=calendar, as_of=as_of, layer=layer, pipeline_id=pipeline_id, research_mode=research_mode,
                 skip_initial_missing_bars=skip_initial_missing_bars,
                 skip_problematic_tickers=skip_problematic_tickers, trading_period=trading_period,
             ).report
@@ -153,7 +192,7 @@ class Research:
                         calendar="XNYS", as_of=None, settings: ExecutionSettings | None = None,
                         layer="raw", pipeline_id=None, skip_initial_missing_bars=False,
                         skip_problematic_tickers=False, trading_period="regular",
-                        factor_registry=None, portfolio_registry=None) -> ResearchRun:
+                        factor_registry=None, portfolio_registry=None, research_mode="strict") -> ResearchRun:
         """Run a long-only shared-account factor portfolio and save its audits.
 
         Scores use completed bars and targets execute at a later bar's open.
@@ -171,7 +210,7 @@ class Research:
             raise TypeError("settings must be ExecutionSettings.")
         snapshot = self._factor_snapshot(
             tickers, spec, start=start, end=end, timeframe=timeframe, provider=provider,
-            calendar=calendar, as_of=as_of, layer=layer, pipeline_id=pipeline_id,
+            calendar=calendar, as_of=as_of, layer=layer, pipeline_id=pipeline_id, research_mode=research_mode,
             skip_initial_missing_bars=skip_initial_missing_bars,
             skip_problematic_tickers=skip_problematic_tickers, trading_period=trading_period,
         )
@@ -187,9 +226,7 @@ class Research:
         )
         serialized_spec = spec.to_dict()
         assumptions = {
-            "price_basis": snapshot.manifest["price_basis"],
-            "corporate_actions": "No automatic split adjustment or corporate-action position accounting.",
-            "dividends": "Excluded from cash and returns.",
+            **_price_assumptions(snapshot.manifest),
             "universe": "User-selected symbols, not a reconstructed point-in-time historical universe.",
             "selection": ("Full-period problematic-ticker exclusions may introduce selection bias."
                           if skip_problematic_tickers else "Strict complete-data preflight; no problematic-ticker exclusions."),
@@ -203,10 +240,8 @@ class Research:
                               "unfilled_orders": "expire_after_intended_open"},
             strategies=[result.strategy_spec], **_engine_environment(),
         )
-        result.metadata.update(flow="factor", layer=manifest["layer"],
-                               price_basis=manifest["price_basis"], assumptions=assumptions)
-        if layer == "processed":
-            result.metadata["pipeline_id"] = manifest["pipeline_id"]
+        result.metadata["flow"] = "factor"
+        _set_result_price_metadata(result, manifest, assumptions)
         if skip_problematic_tickers:
             manifest["warnings"] = [*manifest.get("warnings", []), dict(_RETROSPECTIVE_EXCLUSION)]
         return save_run(self.runs_dir, [result], manifest)
@@ -214,19 +249,21 @@ class Research:
     def backtest(self, tickers, *, strategies, start, end, timeframe="1d", provider="yahoo",
                  calendar="XNYS", as_of=None, settings: ExecutionSettings | None = None,
                  layer="raw", pipeline_id=None, allocation_mode="per_entry", max_workers=1,
-                 skip_initial_missing_bars=False, skip_problematic_tickers=False, trading_period="regular", entry_percentage=10) -> ResearchRun:
+                 skip_initial_missing_bars=False, skip_problematic_tickers=False, trading_period="regular",
+                 entry_percentage=10, research_mode="strict", initial_available_holdings=DEFAULT_HOLDING_SLOTS) -> ResearchRun:
         validate_allocation_options(allocation_mode, max_workers)
+        initial_available_holdings = validate_holding_slots(initial_available_holdings)
         entry_percentage = validate_entry_percentage(entry_percentage)
         workers = self._strategies(strategies)
-        if allocation_mode == "fixed_tenth" and any(not isinstance(worker, BracketStrategy) for worker in workers):
-            raise ValueError("Fixed percentage allocation requires stop/target strategies with entry signals.")
+        if allocation_mode in ("fixed_tenth", "holding_slots") and any(not isinstance(worker, BracketStrategy) for worker in workers):
+            raise ValueError("This capital allocation requires stop/target strategies with entry signals.")
         settings = settings if settings is not None else ExecutionSettings()
         if not isinstance(settings, ExecutionSettings):
             raise TypeError("settings must be ExecutionSettings.")
         # Finish checking EVERY requested instrument before evaluating any strategy.
         snapshot = self._snapshot(tickers, workers, start=start, end=end, timeframe=timeframe,
                                   provider=provider, calendar=calendar, as_of=as_of,
-                                  layer=layer, pipeline_id=pipeline_id,
+                                  layer=layer, pipeline_id=pipeline_id, research_mode=research_mode,
                                   skip_initial_missing_bars=skip_initial_missing_bars,
                                   skip_problematic_tickers=skip_problematic_tickers, trading_period=trading_period)
         results = []
@@ -253,14 +290,16 @@ class Research:
                     snapshot.frames, worker, start=start, end=end,
                     settings=settings, bar_times=times_by_symbol, effective_starts=effective_starts,
                     allocation_mode=allocation_mode, entry_percentage=entry_percentage,
+                    initial_available_holdings=initial_available_holdings,
                 ))
+        assumptions = _price_assumptions(snapshot.manifest)
         for result in results:
-            result.metadata.update(layer=snapshot.manifest["layer"],
-                                   price_basis=snapshot.manifest["price_basis"])
-            if layer == "processed":
-                result.metadata["pipeline_id"] = snapshot.manifest["pipeline_id"]
+            _set_result_price_metadata(result, snapshot.manifest, assumptions)
         manifest = dict(snapshot.manifest)
+        manifest["assumptions"] = assumptions
         manifest["allocation_mode"] = allocation_mode
+        if allocation_mode == "holding_slots":
+            manifest["initial_available_holdings"] = initial_available_holdings
         if allocation_mode == "fixed_tenth":
             manifest["entry_percentage"] = format(entry_percentage.normalize(), "f")
         manifest["max_workers"] = max_workers if allocation_mode == "initial_split" else 1

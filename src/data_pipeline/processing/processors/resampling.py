@@ -7,7 +7,7 @@ with intraday breaks or differently anchored bars need another implementation.
 """
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 import math
 from typing import ClassVar
@@ -108,7 +108,7 @@ class ResampleOHLCV(BaseProcessor):
     def output_contract(self, input_contract: DataContract) -> DataContract:
         if input_contract.timeframe != "1h":
             raise ProcessingError("Hourly-to-daily resampling requires a 1h input contract.")
-        return DataContract("1d")
+        return replace(input_contract, timeframe="1d", timestamp_convention=None)
 
     def validate_backtest_calendar(self, bars, *, input_contract: DataContract,
                                    output_contract: DataContract) -> None:

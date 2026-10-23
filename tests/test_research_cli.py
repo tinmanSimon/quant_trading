@@ -135,10 +135,34 @@ def test_backtest_success_passes_specs_settings_and_prints_saved_path(app, capsy
     assert kwargs["settings"].slippage_bps == Decimal("2")
     assert kwargs["timeframe"] == "1d"
     assert kwargs["calendar"] == "XNYS"
+    assert kwargs["research_mode"] == "strict"
     output = capsys.readouterr().out
     assert "Saved run: example-run" in output
     assert str(path) in output
     service.pipeline.fetch_many.assert_not_called()
+
+
+def test_backtest_passes_explicit_adjusted_price_research_mode(app, tmp_path):
+    service, _ = app
+    service.backtest.return_value = SimpleNamespace(comparison="ok", run_id="adjusted-run", path=tmp_path)
+    assert cli.main(backtest_args(tmp_path) + [
+        "--layer", "processed", "--pipeline-id", "adjusted-pipeline",
+        "--research-mode", "adjusted_price",
+    ]) == 0
+    kwargs = service.backtest.call_args.kwargs
+    assert kwargs["research_mode"] == "adjusted_price"
+    assert kwargs["layer"] == "processed"
+    assert kwargs["pipeline_id"] == "adjusted-pipeline"
+    service.pipeline.fetch_many.assert_not_called()
+
+
+def test_backtest_rejects_unknown_research_mode_before_loading_storage(app, capsys, tmp_path):
+    _, factory = app
+    with pytest.raises(SystemExit) as error:
+        cli.main(backtest_args(tmp_path) + ["--research-mode", "disable_checks"])
+    assert error.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
+    factory.assert_not_called()
 
 
 @pytest.mark.parametrize("option", ["--initial-cash", "--commission-fixed", "--commission-bps", "--slippage-bps"])
@@ -206,3 +230,11 @@ def test_yahoo_fetch_rejects_thirty_minutes_without_initializing_service(app, tm
         cli.main(fetch_args(tmp_path) + ["--timeframe", "30m"])
     assert error.value.code == 2
     factory.assert_not_called()
+
+
+def test_backtest_accepts_holding_slots_allocation(app, tmp_path):
+    service, _ = app
+    service.backtest.return_value = SimpleNamespace(comparison="ok", run_id="example", path=tmp_path)
+    assert cli.main(backtest_args(tmp_path) + ["--allocation-mode", "holding_slots", "--holding-slots", "7"]) == 0
+    assert service.backtest.call_args.kwargs["allocation_mode"] == "holding_slots"
+    assert service.backtest.call_args.kwargs["initial_available_holdings"] == 7

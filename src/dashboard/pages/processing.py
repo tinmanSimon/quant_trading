@@ -1,17 +1,14 @@
 """Local processing workspace, reusable recipes, and exact-output navigation."""
-from collections import defaultdict
 from datetime import time, timedelta
 import json
 from pathlib import Path
 from uuid import uuid4
-import warnings
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 
 from data_pipeline import DataQuery
-from data_pipeline.exceptions import DataAlreadyExistsError
 from data_pipeline.processing import discover_processors
-from data_pipeline.processing.processors.intraday import ResamplingWarning
 from dashboard.components.schema_controls import processor_controls
 from dashboard.state.workspace import market_memory
 
@@ -122,6 +119,8 @@ def _render_processing(research, memory):
     st.subheader("Raw input")
     raw = research.pipeline.list_datasets(DataQuery(layer="raw"))
     selected = []
+    tickers = []
+    provider = ""
     if raw:
         provider = memory.widget(st.selectbox, "Provider", options=sorted({item.request.provider for item in raw}), key="process-provider")
         raw = [item for item in raw if item.request.provider == provider]
@@ -140,6 +139,18 @@ def _render_processing(research, memory):
     else:
         st.info("No active raw datasets. Open Fetch to download input data; you can still prepare a pipeline here.")
     bounds = (min(item.first_timestamp for item in selected).date(), max(item.last_timestamp for item in selected).date()) if selected else None
+    action_bounds = (min(item.first_timestamp for item in selected).astimezone(ZoneInfo("America/New_York")).date(),
+                     max(item.last_timestamp for item in selected).astimezone(ZoneInfo("America/New_York")).date()) if selected else None
+
+    def reference_bars(symbol):
+        # Load only on an explicit Yahoo fetch, one ticker at a time.
+        ids = [item.dataset_id for item in selected if item.request.symbol == symbol]
+        parents, frame = research.pipeline.store.read_raw_inputs(ids)
+        if any(parent.contract.timeframe != "1m" or parent.contract.adjustment_json
+               or parent.contract.source_basis == "vendor_adjusted" or parent.request.provider == "yahoo"
+               for parent in parents):
+            raise ValueError("Dividend reference closes require unadjusted 1m raw inputs.")
+        return frame
 
     st.subheader("Processing pipeline")
     recipes = memory.values.get("recipes", {})
@@ -178,7 +189,12 @@ def _render_processing(research, memory):
             if not definition.causal:
                 st.info("This processor is available for charts; backtesting requires an explicit causal declaration from its author.")
             try:
-                config = processor_controls(definition, memory, prefix, step.get("config"), bounds)
+                config = processor_controls(definition, memory, prefix, step.get("config"), bounds,
+                                            context={"tickers": tickers, "provider": provider,
+                                                     "action_bounds": action_bounds, "reference_bars": reference_bars,
+                                                     "coverage_starts": {symbol: min(item.first_timestamp for item in selected
+                                                         if item.request.symbol == symbol).astimezone(ZoneInfo("America/New_York")).date()
+                                                         for symbol in {item.request.symbol for item in selected}}})
                 step["config"] = config
                 canonical = registry.configure(step["name"], step["version"], config)
                 specs.append({"name": step["name"], "version": step["version"], "config": canonical})
@@ -187,6 +203,9 @@ def _render_processing(research, memory):
                 valid = False
     if not steps:
         st.info("Add at least one processor to create processed data.")
+    if sum(spec["name"] == "adjust_corporate_actions" for spec in specs) > 1:
+        st.error("Use only one corporate-action adjustment step per pipeline.")
+        valid = False
     pipeline = registry.load(specs) if valid else None
     if st.button("Save pipeline recipe", disabled=pipeline is None):
         _save_recipe(memory, pipeline, name)
@@ -195,35 +214,28 @@ def _render_processing(research, memory):
         with st.expander("Exact pipeline configuration"):
             st.caption(f"Pipeline ID: {pipeline.fingerprint}")
             st.json(json.loads(pipeline.canonical_json))
-    groups = defaultdict(list)
+    groups = {symbol: [] for symbol in tickers}
     for item in selected:
         groups[item.request.symbol].append(item.dataset_id)
-    signature = (pipeline.fingerprint if pipeline else None, tuple(sorted(item.to_json() for item in selected)))
+    signature = (pipeline.fingerprint if pipeline else None, tuple(tickers), tuple(sorted(item.to_json() for item in selected)))
     preview_key = "process-preview:" + _scope(research)
     left, right = st.columns(2)
     preview = left.button("Preview processing", disabled=not pipeline or not groups)
     save = right.button("Process and save", type="primary", disabled=not pipeline or not groups)
     if preview:
-        results = []
         with st.spinner("Processing all selected input bars for preview…"):
-            for symbol, ids in groups.items():
-                try:
-                    parents, source = research.pipeline.store.read_raw_inputs(ids)
-                    with warnings.catch_warnings(record=True) as captured:
-                        warnings.simplefilter("always", ResamplingWarning)
-                        output = pipeline.run(source, parents[0].contract)
-                    results.append({"symbol": symbol, "input_rows": source.height, "output_rows": output.frame.height,
-                                    "input_timeframe": parents[0].contract.timeframe,
-                                    "output_timeframe": output.contract.timeframe,
-                                    "warnings": list(dict.fromkeys(str(item.message) for item in captured)),
-                                    "before": source.head(100), "after": output.frame.head(100)})
-                except Exception as error:
-                    results.append({"symbol": symbol, "error": str(error)})
-        st.session_state[preview_key] = (signature, results)
+            batch = research.pipeline.process_many(groups, processors=pipeline, preview=True)
+        st.session_state[preview_key] = (signature, batch["results"])
+        st.session_state[preview_key + ":events"] = (signature, batch["other_events"])
+    event_preview = st.session_state.get(preview_key + ":events")
+    if event_preview and event_preview[0] == signature and event_preview[1]:
+        from dashboard.components.corporate_actions import render_other_events
+        render_other_events(event_preview[1], key="process-preview-events")
     cached = st.session_state.get(preview_key)
     if cached and cached[0] == signature:
         st.subheader("Preview")
-        st.caption("The full selected input was processed. Tables show the first 100 rows; preview does not save data.")
+        st.caption("The full selected input was processed. Tables show the first 100 rows. "
+                   "Preview saves no processed prices; corporate-action snapshots are retained for reproducibility.")
         for result in cached[1]:
             st.markdown(f"**{result['symbol']}**")
             if "error" in result:
@@ -238,29 +250,18 @@ def _render_processing(research, memory):
             after.caption("Processed output")
             after.dataframe(result["after"], hide_index=True)
     if save:
-        report = []
         with st.spinner("Processing and saving each ticker…"):
-            for symbol, ids in groups.items():
-                try:
-                    status = "Saved"
-                    with warnings.catch_warnings(record=True) as captured:
-                        warnings.simplefilter("always", ResamplingWarning)
-                        try:
-                            output = research.pipeline.process(ids, processors=pipeline)
-                        except DataAlreadyExistsError:
-                            matches = [item for item in research.pipeline.list_datasets(DataQuery(layer="processed", pipeline_id=pipeline.fingerprint))
-                                       if set(item.parent_ids) == set(ids)]
-                            if len(matches) != 1:
-                                raise
-                            output = matches[0]
-                            research.pipeline.read_dataset(output.dataset_id)
-                            status = "Already processed"
-                    report.append({"symbol": symbol, "status": status, "dataset_id": output.dataset_id, "rows": output.row_count,
-                                   "warnings": list(dict.fromkeys(str(item.message) for item in captured))})
-                except Exception as error:
-                    report.append({"symbol": symbol, "status": "Failed", "error": str(error)})
-        memory.values["report"] = report
+            batch = research.pipeline.process_many(groups, processors=pipeline)
+        memory.values["report"] = batch["results"]
+        memory.values["corporate_action_report"] = batch
         _save_recipe(memory, pipeline, name)
+    saved_batch = memory.values.get("corporate_action_report", {})
+    if saved_batch.get("other_events"):
+        from dashboard.components.corporate_actions import render_other_events
+        st.caption("Events from the last saved processing request")
+        render_other_events(saved_batch["other_events"], key="process-saved-events")
+        st.download_button("Download complete processing report", json.dumps(saved_batch, indent=2),
+                           "processing_report.json", "application/json", key="process-report-json")
     report = memory.values.get("report", [])
     if report:
         st.subheader("Last processing results")

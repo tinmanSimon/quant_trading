@@ -16,6 +16,14 @@ from .execution import MAX_SHARES, SHARE_QUANTUM, Fill, fee, rebalance
 from .metrics import calculate_metrics
 from .models import BacktestResult, ExecutionSettings, as_decimal
 
+DEFAULT_HOLDING_SLOTS = 25
+
+
+def validate_holding_slots(value):
+    if type(value) is not int or value < 1:
+        raise ValueError("initial_available_holdings must be a positive integer.")
+    return value
+
 
 ENTRY_SCHEMA = {
     "record_id": pl.Int64, "symbol": pl.String, "direction": pl.String,
@@ -134,15 +142,17 @@ def _short_entry(budget, opened, settings):
 
 
 def run_portfolio_backtest(frames, strategy, *, start, end, settings=None, bar_times=None, effective_starts=None,
-                           allocation_mode="per_entry", entry_percentage=10):
-    """Run one shared account with equal free-cash or fixed initial-capital budgets.
+                           allocation_mode="per_entry", entry_percentage=10,
+                           initial_available_holdings=DEFAULT_HOLDING_SLOTS):
+    """Run one shared account with free-cash, fixed-capital or holding-slot budgets.
 
     Thresholds use raw entry open; fills apply configured adverse slippage.
     Intrabar exits are recognized at bar close because OHLC cannot establish
     their exact time. Proceeds cannot finance earlier or same-bar open entries.
     """
-    if allocation_mode not in ("per_entry", "fixed_tenth"):
-        raise ValueError("Shared portfolios support per_entry or fixed_tenth allocation.")
+    if allocation_mode not in ("per_entry", "fixed_tenth", "holding_slots"):
+        raise ValueError("Shared portfolios support per_entry, fixed_tenth or holding_slots allocation.")
+    initial_available_holdings = validate_holding_slots(initial_available_holdings)
     entry_percentage = validate_entry_percentage(entry_percentage)
     start, end = _bound(start, "start"), _bound(end, "end")
     if start >= end:
@@ -208,7 +218,9 @@ def run_portfolio_backtest(frames, strategy, *, start, end, settings=None, bar_t
                         "equity": _display_number(equity), "equity_exact": str(equity),
                         **_money({"reserved_margin": margin, "short_proceeds": proceeds}),
                         **quantity_fields(settings, holdings=holdings),
-                        "position_count": len(positions), "price": None})
+                        "position_count": len(positions), "price": None,
+                        **({"available_holdings": initial_available_holdings - len(positions)}
+                           if allocation_mode == "holding_slots" else {})})
 
     def record_fill(fill, symbol, index, stamp, decision_index, record_id, budget, outcome=None,
                     direction="long", position_action="entry"):
@@ -232,8 +244,8 @@ def run_portfolio_backtest(frames, strategy, *, start, end, settings=None, bar_t
         for (stamp, _, phase), items in sorted(events.items()):
             if phase == "open":
                 unheld = {symbol for symbol in data if eligible_from[symbol] <= stamp} - set(positions)
-                # A single pre-entry snapshot makes simultaneous allocations
-                # independent of ticker ordering. Round down, never borrow.
+                # per_entry uses a single pre-entry snapshot. holding_slots
+                # instead recomputes its budget at each signal below.
                 with localcontext() as allocation_context:
                     allocation_context.rounding = ROUND_FLOOR
                     budget = (settings.initial_cash * entry_percentage / 100 if allocation_mode == "fixed_tenth" else
@@ -259,6 +271,18 @@ def run_portfolio_backtest(frames, strategy, *, start, end, settings=None, bar_t
                     direction = "short" if short_signal else "long"
                     has_shorts = has_shorts or short_signal
                     entry_open = prices[symbol]
+                    if allocation_mode == "holding_slots":
+                        # Derive the counter from filled positions: failed entries
+                        # and failed exits never consume or release a slot.
+                        available_holdings = initial_available_holdings - len(positions)
+                        if available_holdings == 0:
+                            fill = Fill("sell" if short_signal else "buy", 0, 0, entry_open,
+                                        Decimal(0), cash, 0, "rejected", "no_available_holdings")
+                            record_fill(fill, symbol, index, stamp, index - 1, None, Decimal(0), direction=direction)
+                            continue
+                        with localcontext() as allocation_context:
+                            allocation_context.rounding = ROUND_FLOOR
+                            budget = max(cash, Decimal(0)) / available_holdings
                     if short_signal:
                         # Bound repeating reciprocals so later cash arithmetic
                         # remains exact within the ledger's 800-digit context.
@@ -370,6 +394,7 @@ def run_portfolio_backtest(frames, strategy, *, start, end, settings=None, bar_t
             open_records.append({**position, **_money({"last_price": prices[symbol],
                                                       "market_value": market_value, "unrealized_pnl": unrealized})})
         equity_frame = pl.DataFrame(records, schema={**equity_schema, "position_count": pl.Int64,
+                                                    **({"available_holdings": pl.Int64} if allocation_mode == "holding_slots" else {}),
                                                     **_money_schema(("reserved_margin", "short_proceeds"))})
         trade_frame = pl.DataFrame(trades, schema={**trade_schema, **FILL_EXTRA})
         metrics = calculate_metrics(equity_frame, trade_frame)
@@ -404,8 +429,11 @@ def run_portfolio_backtest(frames, strategy, *, start, end, settings=None, bar_t
                   "share_precision": 8 if settings.fractional_shares else 0,
                   "effective_starts": {symbol: eligible_from[symbol].isoformat() for symbol in data},
                   "allocation_mode": allocation_mode,
+                  **({"initial_available_holdings": initial_available_holdings,
+                      "available_holdings": initial_available_holdings - len(positions)} if allocation_mode == "holding_slots" else {}),
                   "entry_percentage": format(entry_percentage.normalize(), "f") if allocation_mode == "fixed_tenth" else None,
                   "allocation": ("fixed_percentage_initial_capital_per_entry_skip_if_unfunded" if allocation_mode == "fixed_tenth"
+                                 else "current_cash_divided_by_available_holdings" if allocation_mode == "holding_slots"
                                  else "cash_divided_by_eligible_nonheld_tickers_at_open"),
                   "simultaneous_entry_priority": "ticker_ascending",
                   "execution": "next_bar_open_entry_strict_intrabar_threshold_exit",

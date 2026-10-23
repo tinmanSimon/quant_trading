@@ -156,7 +156,7 @@ def _numeric_kwargs(schema, value):
     return kwargs
 
 
-def _field(label, schema, value, memory, key, bounds):
+def _field(label, schema, value, memory, key, bounds, context=None):
     """Render common JSON Schema types; complex unions/maps remain editable JSON."""
     if value is _MISSING:
         value = schema.get("default", _MISSING)
@@ -169,6 +169,10 @@ def _field(label, schema, value, memory, key, bounds):
                   **next(v for v in variants if v.get("type") != "null")}
     if schema.get("format") == "trading_sessions":
         return _sessions(label, schema, value, memory, key, bounds)
+    if schema.get("format") == "corporate_action_snapshot":
+        from .corporate_actions import snapshot_controls
+        return snapshot_controls(label, None if value is _MISSING else value,
+                                 memory, key, bounds, context)
     if "const" in schema:
         st.caption(f"{label}: {schema['const']}")
         return schema["const"]
@@ -192,11 +196,11 @@ def _field(label, schema, value, memory, key, bounds):
                                  f"ISO {schema['format']}" if schema.get("format") else None))
     if kind == "object" and schema.get("properties") and schema.get("additionalProperties") is False:
         st.markdown(f"**{label}**")
-        return _object(schema, {} if value is _MISSING or value is None else value, memory, key, bounds)
+        return _object(schema, {} if value is _MISSING or value is None else value, memory, key, bounds, context)
     return _json_editor(label, schema, value, memory, key)
 
 
-def _object(schema, values, memory, prefix, bounds):
+def _object(schema, values, memory, prefix, bounds, context=None):
     result = {}
     errors = []
     for name, field in schema.get("properties", {}).items():
@@ -208,7 +212,7 @@ def _object(schema, values, memory, prefix, bounds):
             if not enabled:
                 continue
         try:
-            result[name] = _field(label, field, values.get(name, _MISSING), memory, key, bounds)
+            result[name] = _field(label, field, values.get(name, _MISSING), memory, key, bounds, context)
         except ValueError as error:
             st.error(str(error))
             errors.append(str(error))
@@ -217,11 +221,11 @@ def _object(schema, values, memory, prefix, bounds):
     return result
 
 
-def processor_controls(definition, memory, prefix, values=None, bounds=None):
+def processor_controls(definition, memory, prefix, values=None, bounds=None, *, context=None):
     schema = definition.schema
     if not schema.get("properties") and schema.get("additionalProperties") is False:
         st.info("This processor doesn’t have any configurable variables.")
         return {}
     if schema.get("additionalProperties") is not False:
         return _json_editor("Configuration", schema, values or {}, memory, prefix + "-json")
-    return _object(schema, values or {}, memory, prefix, bounds)
+    return _object(schema, values or {}, memory, prefix, bounds, context)

@@ -54,6 +54,10 @@ def build_parser() -> argparse.ArgumentParser:
     process = commands.add_parser("process")
     process.add_argument("dataset_ids", nargs="+", help="Compatible active raw input IDs")
     process.add_argument("--processors", type=Path, required=True)
+    batch = commands.add_parser("process-many", help="Process raw batches by ticker and save an event report")
+    batch.add_argument("dataset_ids", nargs="*")
+    batch.add_argument("--tickers", nargs="+", default=[], help="Include tickers without selected batches in the report")
+    batch.add_argument("--processors", type=Path, required=True)
     replace = commands.add_parser("replace", help="Refetch and replace a whole raw revision; preserve history")
     replace.add_argument("dataset_id")
     replace.add_argument("--confirm", required=True, help="Repeat the exact dataset ID")
@@ -97,6 +101,16 @@ def main(argv: list[str] | None = None) -> int:
                 print(frame.write_json())
             else:
                 print("[" + ",".join(item.to_json() for item in pipeline.list_datasets(query)) + "]")
+        elif args.command == "process-many":
+            inputs = {symbol.strip().upper(): [] for symbol in args.tickers if symbol.strip()}
+            for dataset_id in args.dataset_ids:
+                item = pipeline.get_metadata(dataset_id)
+                inputs.setdefault(item.request.symbol, []).append(dataset_id)
+            if not inputs:
+                raise ValueError("Select raw datasets or requested tickers.")
+            report = pipeline.process_many(inputs, processors=_processors(args.processors))
+            print(json.dumps(report, sort_keys=True))
+            return int(any(row["status"] == "Failed" for row in report["results"]))
         elif args.command == "inspect":
             print(pipeline.get_metadata(args.dataset_id).to_json())
         elif args.command == "process":

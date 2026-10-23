@@ -6,7 +6,7 @@ from streamlit.testing.v1 import AppTest
 
 from data_pipeline.processing import ScalePrices
 from research import Research, ResearchError
-from test_dashboard_processed_backtest import _source
+from test_dashboard_processed_backtest import _adjusted_source, _source
 
 
 def _open(monkeypatch, research):
@@ -98,6 +98,8 @@ def test_factor_dashboard_routes_processed_source_and_execution_options(tmp_path
     monkeypatch.setattr(research, "factor_backtest", record)
     app = _open(monkeypatch, research)
     app.radio(key="factor-layer").set_value("processed").run()
+    assert app.radio(key="factor-research-mode").value == "strict"
+    app.radio(key="factor-research-mode").set_value("adjusted_price").run()
     _small_factors(app)
     app.number_input(key="factor-reserve").set_value(5.0)
     app.number_input(key="factor-cap").set_value(20.0)
@@ -112,6 +114,7 @@ def test_factor_dashboard_routes_processed_source_and_execution_options(tmp_path
     request = calls[0]
     assert request["tickers"] == ["AAPL"]
     assert request["layer"] == "processed" and request["pipeline_id"] == processed.pipeline_id
+    assert request["research_mode"] == "adjusted_price"
     assert request["calendar"] == "XNYS" and request["timeframe"] == "1d"
     assert request["skip_initial_missing_bars"] and request["skip_problematic_tickers"]
     assert request["settings"].fractional_shares
@@ -122,6 +125,30 @@ def test_factor_dashboard_routes_processed_source_and_execution_options(tmp_path
     assert request["spec"].sale_proceeds == "next_open"
     assert request["spec"].funding == "score_priority"
     assert research.list_runs() == []
+    app.radio(key="factor-layer").set_value("raw").run()
+    assert not any(field.key == "factor-research-mode" for field in app.radio)
+    app.button(key="factor-submit").click().run()
+    assert not app.exception
+    assert calls[-1]["research_mode"] == "strict"
+
+
+def test_factor_adjusted_research_run_and_mode_persist(tmp_path, monkeypatch):
+    research = Research(tmp_path / "data", tmp_path / "runs")
+    processed = _adjusted_source(research)
+    app = _open(monkeypatch, research)
+    app.radio(key="factor-layer").set_value("processed").run()
+    app.radio(key="factor-research-mode").set_value("adjusted_price").run()
+    _small_factors(app)
+    app.button(key="factor-submit").click().run(timeout=30)
+    assert not app.exception and not app.error
+    run = app.session_state["factor-run"]
+    assert run.manifest["research_mode"] == "adjusted_price"
+    assert run.manifest["pipeline_id"] == processed.pipeline_id
+    assert any("Research mode: Adjusted-price research" in item.value for item in app.caption)
+    assert any("without additional cash credits" in item.value for item in app.info)
+    restored = _open(monkeypatch, research)
+    assert restored.radio(key="factor-research-mode").value == "adjusted_price"
+    assert restored.session_state["factor-run"].run_id == run.run_id
 
 
 def test_factor_run_audit_and_saved_run_restore(tmp_path, monkeypatch):

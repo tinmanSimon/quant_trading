@@ -25,7 +25,9 @@ ProcessorFactory = Callable[[Mapping[str, JSONValue]], Processor]
 class ProcessorDefinition:
     """Display/configuration contract carried entirely by a processor class.
 
-    ``causal`` must be explicitly true before research will accept a processor.
+    ``causal`` must be explicitly true before strict research accepts a processor.
+    Adjusted-price research makes a narrow exception for the built-in corporate
+    action processor without changing its causality declaration.
     ``price_basis`` is either ``preserve`` or ``transformed``. These describe
     semantics without changing the versioned config or historical fingerprints.
     """

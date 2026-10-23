@@ -219,7 +219,7 @@ are UTC. For example, 04:00–20:00 America/New_York on 2024-10-11 becomes
 08:00 UTC that day through 00:00 UTC the following day. Settings persist across
 page navigation and new dashboard sessions.
 
-The current resampler converts hourly bars into daily OHLCV. Its incomplete-session
+**Resample OHLCV** converts hourly bars into daily OHLCV. Its incomplete-session
 policy can raise or drop; out-of-session and off-grid bars are always rejected.
 Custom hours do not split mixed regular/extended-hours bars or repair alignment:
 input must already match an hourly grid anchored to the configured opening.
@@ -227,6 +227,15 @@ The schedule is part of the saved pipeline identity. Review it when applying a
 saved recipe to different dates. These calendar choices apply to processing;
 the dashboard's Backtest page still uses XNYS and requires resampled session
 boundaries to match its calendar.
+
+For regular-hours daily bars from minute data, add **Regular hours: 1m to 1d**
+(`resample_regular_hours_1d`, version `1`). Generate the session schedule, preview,
+then save. This processor enforces XNYS regular hours, including DST, holidays,
+and early closes; pre-market and after-hours minutes are excluded and reported.
+It produces one daily OHLCV bar per symbol/session, labeled at midnight UTC.
+**Incomplete sessions** defaults to `raise`; `drop` omits affected days, and
+`aggregate_available` uses observed minutes with a warning. See
+[minute-to-daily resampling](#regular-hours-minute-to-daily-resampling) for details.
 
 Saved outputs have **Open in Market data** and **Use in Backtest** shortcuts.
 Market data's processed layer and Backtest's processed source let you choose a
@@ -874,11 +883,13 @@ fills. Each strategy/ticker has fresh state. Future-row perturbation tests,
 manual fee/slippage examples and ledger invariants verify these rules. Custom
 Python code can still access outside information; this API is not a sandbox
 against a strategy that deliberately reads future data elsewhere. Arbitrary
-preprocessed histories are excluded because valid timestamps alone cannot
-establish that their transformations were causal.
+preprocessed histories are excluded by default because valid timestamps alone
+cannot establish that their transformations were causal. The explicit
+**Adjusted-price research** mode below admits the built-in split/dividend
+adjustment processor while retaining the other preflight checks.
 
-This first engine reports **price returns**, with open positions valued at the
-last included close. It does not credit dividends, reconstruct corporate
+In strict mode, the engine reports **price returns**, with open positions valued
+at the last included close. It does not credit dividends, reconstruct corporate
 actions, model settlement, exchange order queues, market impact, or constrain
 fills to a fraction of positive reported volume. It assumes positive-volume
 bars can execute the requested affordable quantity at the slipped open.
@@ -887,11 +898,59 @@ these results are not a reconstruction of a broker account across corporate
 actions. There is no live order execution. These assumptions are also saved
 in result metadata.
 
+### Adjusted-price research
+
+Select **Adjusted-price research** when backtesting processed data from
+`adjust_corporate_actions`, optionally followed by a resampling processor. The
+default **Strict** mode still rejects this retrospective adjustment because it
+uses split and cash-dividend events that may occur after a historical bar.
+Adjusted-price research explicitly permits those adjustments; it does not
+declare the processor causal or permit unrelated processors to use future data.
+Calendar, coverage, checksum, raw-parent and pipeline checks still apply.
+
+In Python, pass `research_mode="adjusted_price"` with `layer="processed"` and
+the saved pipeline fingerprint to `preflight`, `backtest`, `factor_preflight`
+or `factor_backtest`. The processed data must include the built-in corporate
+action adjustment. For example:
+
+```python
+run = research.backtest(
+    ["AAPL", "MSFT"], strategies=strategies,
+    start=start, end=end, timeframe="1d", provider="databento",
+    layer="processed", pipeline_id=adjusted_pipeline_id,
+    research_mode="adjusted_price",
+    settings=ExecutionSettings(fractional_shares=True),
+)
+```
+
+The CLI exposes the same choice:
+
+```bash
+quant-research backtest --tickers AAPL MSFT --timeframe 1d --provider databento \
+  --start "$TEST_START" --end "$END" --strategies strategies.example.json \
+  --layer processed --pipeline-id "$ADJUSTED_PIPELINE_ID" \
+  --research-mode adjusted_price
+```
+
+Strategies and executions use the stored adjusted prices and share units.
+Cash-dividend effects are reflected in the adjusted series; the engine does
+not credit another dividend payment. It does not reconstruct historical share
+counts, cash distributions, taxes or dividend reinvestment in a brokerage
+account. Absolute price thresholds, whole-share rounding and any assumptions
+tied to historical share units can therefore produce different results from
+a simulation using original prices and explicit corporate-action accounting.
+
+Saved manifests and result metadata identify the research mode and return
+basis. The processed lineage retains the exact action snapshot, reference date
+and checksum. Runs with different research modes have different comparison
+identities. Selecting the mode uses existing processed data; it does not fetch
+new actions or change the snapshot.
+
 ### Shared portfolios with stop and target exits
 
 Strategies implementing `research.strategies.BracketStrategy` run through the
 same preflight, Backtest page, and saved-run pipeline. **Capital allocation**
-selects one of three modes:
+selects one of four modes:
 
 - **Distribute at each entry:** one shared cash account. Each new entry receives
   available cash divided by all eligible tickers not currently held, including
@@ -904,6 +963,19 @@ selects one of three modes:
   in ascending ticker order. This mode requires stop/target strategies and runs
   sequentially (`allocation_mode="fixed_tenth", entry_percentage=7` in Python;
   `--entry-percentage 7` in the CLI).
+- **Available holdings (slots):** set **Initial holding slots** (default 25) for
+  each strategy's shared account. Before each entry, budget current available cash divided
+  by available holdings, including fees and slippage. A filled entry consumes
+  one slot; a fully executed exit releases one, whether a win, loss or ambiguous
+  stop. Rejected entries/exits do not change the count. At zero available slots,
+  skip new entries without queuing them. Simultaneous signals run in ascending
+  ticker order, recalculating the budget after every fill. Exit proceeds and
+  released slots become available when the existing engine recognizes the exit,
+  never before it. This normal-backtest mode requires stop/target strategies;
+  factor backtests are unchanged. Use `allocation_mode="holding_slots"` in
+  Python, with `initial_available_holdings=10` to select a capacity of 10; use
+  `--allocation-mode holding_slots --holding-slots 10` in the CLI. Saved results include
+  the initial capacity and available holdings alongside the equity history.
 - **Split once at start:** divide total initial capital equally among the usable
   tickers. Each ticker retains its own cash and profits throughout the run.
   Independent ticker simulations can run in parallel using **Parallel workers**.
@@ -1427,8 +1499,9 @@ The CLI loads an ordered JSON list from a file:
 Python callers can pass processor instances directly or register custom
 factories with `ProcessorRegistry`. The default loader, CLI, dashboard, and
 processed-data backtests automatically discover processors; the bundled
-processors are `scale_prices`, `resample_ohlcv`, and `filter_time_window`, all
-version `1`.
+processors are `scale_prices`, `resample_ohlcv`, `filter_time_window`,
+`resample_intraday`, `resample_regular_hours_30m`, and `resample_regular_hours_1d`,
+all version `1`.
 
 ### Implementing a processor
 
@@ -1486,6 +1559,9 @@ output availability against the supplied expected bars (timestamp, open, close).
 The base implementation accepts unchanged contracts. This validation lives in
 the processor, so adding one does not require editing research logic. Processors
 without a causality declaration remain usable for processing and charts.
+The research mode `adjusted_price` makes one explicit exception for the built-in
+`adjust_corporate_actions` processor; it does not relax this requirement for
+custom processors.
 
 Inherit `BaseProcessor` and implement the three internal hooks. Do not override
 the public `transform(frame, input_contract)` wrapper: it resolves the output
@@ -1559,6 +1635,203 @@ need a public `output_contract()` method. Identity/configuration must remain
 unchanged during execution. Settings affecting output belong in config, not
 hidden mutable state. Processor-provided checks do not replace independent tests.
 
+### Regular-hours minute-to-daily resampling
+
+`ResampleRegularHoursDaily` combines `1m` bars directly into `1d` OHLCV using
+XNYS regular sessions: normally 09:30–16:00 New York time. Calendar schedules
+account for DST, holidays, and early closes. Only minutes whose starts fall in
+`[session open, session close)` are included. Pre-market, after-hours, and
+nontrading-day bars are excluded with a count in preview/save warnings. Edited
+session JSON must still match the exchange's actual regular boundaries.
+
+```python
+from datetime import date
+from data_pipeline.processing.processors.daily import ResampleRegularHoursDaily
+
+processor = ResampleRegularHoursDaily.for_dates(date(2024, 1, 2), date(2024, 1, 31))
+daily = pipeline.process([first_raw_id, second_raw_id], processors=[processor])
+assert daily.request.timeframe == "1d"
+```
+
+Date bounds for `for_dates` are inclusive. Select compatible raw batches for the
+same provider and symbol; a session may span multiple batches. Each daily bar
+uses the first regular minute's open, maximum high, minimum low, last close, and
+summed volume. Output timestamps are session-date labels at midnight UTC;
+backtesting validates that the bar completes at the actual session close.
+
+Include every intended session in the schedule so missing days can be detected.
+`incomplete="raise"` rejects any missing regular-session minutes by default.
+`"drop"` omits entire incomplete symbol/days with a warning.
+`"aggregate_available"` aggregates observed minutes with a warning; open/close
+then come from the first/last available minute. Neither policy fills prices or
+volume, verifies gap causes, or creates wholly empty days. An all-empty result
+fails instead of saving an empty dataset. `processor.quality_report(frame)`
+reports expected, observed, and missing minutes per incomplete symbol/session.
+
+The exact sessions and missing-minute policy are saved in the recipe and its
+fingerprint. Raw inputs remain unchanged. Discovery supplies the CLI, dashboard
+controls, and processed-data backtesting without separate registration.
+
+### Split and cash-dividend adjustment before resampling
+
+Add **Adjust prices: splits and cash dividends** (`adjust_corporate_actions`,
+version `1`) before the resampler. The processor accepts unadjusted US-equity
+`1m` OHLCV and applies a frozen corporate-action snapshot through one inclusive
+reference date. Raw files remain unchanged. Use one pipeline for the adjustment
+and any subsequent minute, hourly, or daily resampling; processing inputs are
+still raw revisions, so saved processed revisions cannot be chained as inputs.
+
+| Event | Earlier OHLC prices | Earlier volume |
+| --- | --- | --- |
+| Forward/reverse split or verified same-class stock dividend | Divide by new-shares / old-shares ratio | Multiply by that ratio |
+| Regular or special USD cash dividend | Multiply by a verified per-event factor, or `(previous regular close - cash) / previous regular close` | Unchanged |
+| Spin-off, rights issue, merger/acquisition, share exchange, return of capital, ADR ratio change, currency redenomination, symbol change, delisting, or other unsupported event | Reported without adjustment | Unchanged |
+
+Each event affects only bars before midnight New York time on its ex-date,
+including premarket trading. Multiple events compound back through history.
+Dividend amounts and reference closes must use the same currency and share
+basis. A simultaneous split/dividend or multiple cash distributions on one date
+requires verified per-event factors; the processor does not guess their order
+or reuse a cumulative vendor factor. Cancelled events are ignored. Pending,
+ambiguous, missing, or invalid supported-event factors fail the affected ticker.
+
+In **Process data**, select all requested tickers and add the adjustment step.
+**Yahoo Finance (free)** is the default event provider: click **Fetch corporate
+actions from Yahoo** to retrieve reported splits and cash dividends without an
+API key. Your Databento or Massive minute prices remain the inputs. The Yahoo
+adapter uses `yfinance`, already installed with this project. It checks for a
+supported US equity, USD currency, New York timezone and daily history covering
+the requested sessions. A failed or incomplete response is never interpreted
+as an event-free history.
+
+Yahoo dividend amounts may already reflect later splits. The adapter retrieves
+full daily history, including splits after the selected adjustment reference
+date, to restore event-date share units. Dividend factors then use the final
+regular-session minute from the preceding exchange session in your selected
+raw batches, accounting for holidays and early closes. Include that minute for
+each relevant dividend. Missing closes, unsupported currencies and ambiguous
+same-day split/dividend terms leave the event pending and prevent adjustment
+of that ticker. Yahoo does not reliably distinguish regular from special cash
+dividends; reported supported cash distributions use the same calculation.
+Yahoo also sometimes reports spin-off price factors in its split field. Only
+integer forward ratios (such as 4-for-1) and their reverse equivalents are
+automatically accepted. Unusual ratios, including legitimate 3-for-2 splits,
+are marked pending and shown as unclassified actions for manual verification.
+An ambiguous later ratio also blocks restoring earlier dividend share units.
+This conservative filter reduces known misclassification risks; it cannot
+independently verify every event reported by Yahoo.
+
+Yahoo identifies instruments by ticker, not a verified historical security
+master. Historical ticker reuse or corporate reorganizations need independent
+review. Its supported-event coverage describes the response checks above, not
+a guarantee that Yahoo has every distribution. **Other-event coverage remains
+unknown**, even when split/dividend retrieval succeeds: the report must not say
+there were no spin-offs, mergers or other events. Previously saved snapshots
+and recipes stay frozen; choosing another provider affects the next fetch only.
+Yahoo's API is intended for personal use; see the
+[yfinance documentation](https://ranaroussi.github.io/yfinance/).
+
+You can instead choose **Databento Reference (subscription)**, or import verified
+snapshot JSON. Databento requires `DATABENTO_API_KEY` and Reference subscriptions
+for Security Master, Corporate Actions and Adjustment Factors; requests may
+incur charges. It checks security identity, revisions and dividend factors. Its
+automatic history starts on 2018-05-01; older ranges need verified imports.
+Yahoo **price-bar inputs** are still rejected because their price and volume
+basis cannot be verified as unadjusted here; this is separate from using Yahoo
+as the event provider. Existing raw datasets with an unknown basis require an
+explicit `source_basis="unadjusted"` assertion in their verified coverage record.
+
+The snapshot includes `source`, `reference_date`, `fetched_at`,
+`methodology_version`, `coverage`, and `events`; the dataclasses in
+`data_pipeline.corporate_actions` define the normalized format. Imports accept
+either that object or a checksum-verified snapshot envelope. Each coverage
+record identifies the ticker, source `security_id`, inclusive checked dates,
+supported-event `status`, optional `other_events_status`, and original source
+basis. Legacy snapshots without `other_events_status` retain their original
+all-events coverage semantics and checksums. Each event identifies its ticker,
+security, unique event ID, type, ex-date boundary, status, and verified terms.
+Imported values must come from verified event evidence; importing JSON does
+not independently establish the truth of its coverage or factors.
+
+```python
+from datetime import date
+from pathlib import Path
+from data_pipeline.corporate_actions.providers import import_snapshot
+from data_pipeline.processing import Pipeline
+from data_pipeline.processing.processors.price_adjustment import AdjustCorporateActions
+from data_pipeline.processing.processors.daily import ResampleRegularHoursDaily
+
+snapshot = import_snapshot(Path("verified_actions.json").read_bytes())
+recipe = Pipeline([
+    AdjustCorporateActions(snapshot),
+    ResampleRegularHoursDaily.for_dates(date(2024, 1, 2), date(2024, 1, 31)),
+])
+# Include each requested ticker, even if it has no selected raw batches.
+report = pipeline.process_many(
+    {"AAPL": [aapl_raw_id], "MSFT": [msft_raw_id], "TSLA": []},
+    processors=recipe,
+)
+print(report["other_events"])
+Path("adjusted_daily_recipe.json").write_text(recipe.canonical_json)
+```
+
+To acquire the snapshot from Yahoo in Python instead of importing it:
+
+```python
+from data_pipeline.corporate_actions.providers import YahooActionProvider
+
+snapshot = YahooActionProvider().fetch(
+    ["AAPL", "MSFT"], date(2024, 1, 2), date(2024, 1, 31),
+    source_basis="unadjusted",
+    reference_bars={"AAPL": pipeline.read_dataset(aapl_raw_id),
+                    "MSFT": pipeline.read_dataset(msft_raw_id)},
+)
+```
+
+`reference_bars` can also be a callable accepting a ticker and returning its
+unadjusted minute frame; the dashboard loads one ticker at a time. No event
+fetch happens during processing or recipe replay. Snapshots are cached with
+the recipe and pinned to disk during preview/save.
+
+`process_many(..., preview=True)` processes the full inputs and returns the
+first 100 before/after rows per successful ticker without publishing processed
+prices. Preview and save both pin snapshots under `data/corporate_actions/`.
+Saves also write a JSON report under `data/processing_reports/`. The report
+contains all requested tickers, including failures and those without raw input;
+the other-events table distinguishes checked ranges with no other events from
+unknown/incomplete coverage. The dashboard displays this table and offers CSV
+and JSON downloads. The same workflow is available from the CLI:
+
+```bash
+data-pipeline process-many AAPL_RAW_ID MSFT_RAW_ID --tickers TSLA \
+  --processors adjusted_daily_recipe.json
+```
+
+The command emits the complete report and exits nonzero if any ticker fails.
+
+The exact snapshot, reference date and methodology are part of the recipe and
+pipeline fingerprint. Saved output contracts carry `adjustment_json` with the
+price basis and snapshot checksum; resampling preserves it. Repeating a recipe
+never refreshes actions silently, and reapplying adjustment to an already
+adjusted contract is rejected. Updating actions creates a distinct recipe and
+processed revision. Reports list unsupported actions without claiming that the
+result is adjusted for those events.
+
+This is a retrospective analytical series. The processor declares
+`causal=False`, so strict research backtests reject it. Select
+**Adjusted-price research** (`research_mode="adjusted_price"`) to backtest its
+processed output, including output resampled into other timeframes. Prices
+and holdings are interpreted in adjusted units, and cash-dividend effects
+are already reflected in the series. The engine does not add dividend cash
+payments, dividend reinvestment, taxes or corporate-action share-count changes
+to the trading account. See **Adjusted-price research** above for API and CLI
+examples and the saved-run assumptions.
+
+Implementation is separated into
+`processing/processors/price_adjustment/` (split/dividend handlers, factors and
+validation) and `corporate_actions/` (shared event models, providers, snapshot
+storage and reporting).
+
 ### Hourly-to-daily resampling
 
 Supply an explicit schedule of date labels and aware opening/closing instants.
@@ -1604,7 +1877,7 @@ Example `processors.json` for the synthetic schedule above:
 }}]
 ```
 
-Resampling currently accepts `1h` bars anchored at session open, one continuous
+`ResampleOHLCV` accepts `1h` bars anchored at session open, one continuous
 `[open, close)` window per date label. The last hourly bar may be shorter than
 an hour. Correct schedules can express DST offsets, overnight sessions and
 early closes. Intraday breaks, differently anchored vendor bars, other target

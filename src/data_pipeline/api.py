@@ -129,6 +129,17 @@ class DataPipeline:
 
         pipeline = _pipeline(processors)
         parents, frame = self.store.read_raw_inputs(raw_id)
+        action_specs = [spec for spec in pipeline.identities if spec["name"] == "adjust_corporate_actions"]
+        if action_specs:
+            if len(action_specs) > 1:
+                raise ProcessingError("Only one corporate-action adjustment step is allowed per pipeline.")
+            if parents[0].request.provider == "yahoo":
+                raise ProcessingError("Yahoo raw prices may already contain split adjustments. "
+                                      "Use a source with verified unadjusted OHLCV.")
+            from .corporate_actions.models import ActionSnapshot
+            from .corporate_actions.storage import SnapshotStore
+            SnapshotStore(self.store.data_dir / "corporate_actions").save(
+                ActionSnapshot.from_dict(action_specs[0]["config"]["snapshot"]))
         if not pipeline.identities:
             if len(parents) != 1:
                 raise RequestDataMismatchError("An empty processor pipeline requires a single raw input.")
@@ -138,6 +149,11 @@ class DataPipeline:
                                           pipeline_id=pipeline.fingerprint,
                                           processors_json=pipeline.canonical_json,
                                           output_contract=output.contract)
+
+    def process_many(self, inputs, *, processors, preview=False):
+        """Process ticker-to-raw-ID groups with an all-ticker corporate-action report."""
+        from .processing_batch import process_many
+        return process_many(self, inputs, processors=processors, preview=preview)
 
     def refetch(self, raw_id: str, *, confirm: str) -> StoredDataset:
         """Fetch the original request again and explicitly replace its entire raw batch."""

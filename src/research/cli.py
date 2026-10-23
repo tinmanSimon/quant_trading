@@ -60,12 +60,16 @@ def main(argv=None):
             sub.add_argument("--calendar", default="XNYS")
             sub.add_argument("--layer", choices=("raw", "processed"), default="raw")
             sub.add_argument("--pipeline-id", help="Exact processing pipeline fingerprint; required for processed backtests.")
+            sub.add_argument("--research-mode", choices=("strict", "adjusted_price"), default="strict",
+                             help="Use adjusted_price for processed split/dividend-adjusted histories; strict requires causal processing (default).")
             sub.add_argument("--initial-cash", type=_decimal, default=Decimal("10000"))
             sub.add_argument("--commission-fixed", type=_decimal, default=Decimal("0"))
             sub.add_argument("--commission-bps", type=_decimal, default=Decimal("0"))
             sub.add_argument("--slippage-bps", type=_decimal, default=Decimal("0"))
-            sub.add_argument("--allocation-mode", choices=("per_entry", "initial_split", "fixed_tenth"), default="per_entry",
-                             help="Allocate shared cash at each entry, split capital once, or budget a fixed percentage of initial capital per bracket entry.")
+            sub.add_argument("--allocation-mode", choices=("per_entry", "initial_split", "fixed_tenth", "holding_slots"), default="per_entry",
+                             help="Allocate shared cash, split capital once, use a fixed percentage, or divide current cash by remaining slots (25 by default).")
+            sub.add_argument("--holding-slots", type=int, default=25,
+                             help="Initial available holdings in holding_slots mode (positive integer; default: 25).")
             sub.add_argument("--entry-percentage", type=_decimal, default=Decimal("10"),
                              help="Initial capital percentage per entry in fixed_tenth mode (default: 10).")
             sub.add_argument("--max-workers", type=int, default=1,
@@ -95,8 +99,9 @@ def main(argv=None):
                                      commission_bps=args.commission_bps, slippage_bps=args.slippage_bps,
                                      fractional_shares=args.fractional_shares)
         run = app.backtest(**query, strategies=specs, settings=settings, calendar=args.calendar,
-                           layer=args.layer, pipeline_id=args.pipeline_id,
+                           layer=args.layer, pipeline_id=args.pipeline_id, research_mode=args.research_mode,
                            allocation_mode=args.allocation_mode, max_workers=args.max_workers, entry_percentage=args.entry_percentage,
+                           initial_available_holdings=args.holding_slots,
                            skip_initial_missing_bars=args.skip_initial_missing_bars)
         if args.allocation_mode == "initial_split" and run.manifest.get("allocation_summary"):
             print(json.dumps(run.manifest["allocation_summary"], indent=2))

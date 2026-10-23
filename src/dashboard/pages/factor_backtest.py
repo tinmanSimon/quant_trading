@@ -7,6 +7,7 @@ import polars as pl
 import streamlit as st
 
 from dashboard.charts import CHART_CONFIG, line_chart
+from dashboard.components.research_mode import research_mode_control, show_research_mode
 from dashboard.components.source_controls import _date_fields, _provider_choice, _tickers
 from dashboard.pages.processing import pipeline_label
 from dashboard.state.workspace import market_memory
@@ -58,6 +59,7 @@ def _source_controls(research, memory):
     provider = _provider_choice((item.request.provider for item in local), key="factor-provider", memory=memory)
     local = [item for item in local if item.request.provider == provider]
     pipeline_id = None
+    research_mode = "strict"
     if layer == "processed":
         pipelines = sorted({item.pipeline_id for item in local})
         labels = {value: pipeline_label(research, value, items=local) for value in pipelines}
@@ -65,6 +67,7 @@ def _source_controls(research, memory):
                                     format_func=labels.get, key="factor-pipeline")
         local = [item for item in local if item.pipeline_id == pipeline_id]
         st.caption("Preflight checks this pipeline's raw-source lineage. All tickers use the same pipeline.")
+        research_mode = research_mode_control(memory, key="factor-research-mode")
     timeframes = [value for value in BACKTEST_TIMEFRAMES if any(
         item.request.timeframe == value for item in local)]
     if not timeframes:
@@ -98,7 +101,7 @@ def _source_controls(research, memory):
                "Factor lookbacks count bars; choose a start with enough earlier data for warm-up.")
     return dict(tickers=list(dict.fromkeys(chosen + _tickers(extra, provider))), provider=provider,
                 start=start, end=end, timeframe=timeframe, calendar="XNYS", layer=layer,
-                pipeline_id=pipeline_id, trading_period=trading_period,
+                pipeline_id=pipeline_id, research_mode=research_mode, trading_period=trading_period,
                 skip_initial_missing_bars=allow_late, skip_problematic_tickers=skip_bad)
 
 
@@ -195,8 +198,8 @@ def _render_page(research, memory):
     st.title("Factor backtest")
     st.caption("Rank stocks, build target portfolios, and rebalance one shared account using local data. "
                "Configuration and your latest saved run survive navigation and restarts.")
-    st.info("Prices are used as stored. Splits, dividends, and a historical membership universe are not modeled; "
-            "today's ticker list and unadjusted prices can bias multi-year results.")
+    st.info("Prices are used as stored. A historical membership universe is not modeled; "
+            "today's ticker list can bias multi-year results. Processed data can use adjusted-price research mode.")
     source = _source_controls(research, memory)
     if source:
         try:
@@ -250,13 +253,15 @@ def _audit_frame(ui, frame, title):
 
 def show_factor_result(run, *, ui=st):
     ui.subheader(f"Factor run {run.run_id}")
+    show_research_mode(run.manifest, ui=ui)
     ui.caption("One shared long-only account. Return and drawdown values are fractions; 0.10 means 10%.")
     for field, title in (("ticker_errors", "Skipped ticker errors"), ("warnings", "Run warnings")):
         records = run.manifest.get(field, [])
         if records:
             ui.warning(title)
             ui.dataframe(pl.DataFrame(records, infer_schema_length=None), hide_index=True)
-    if run.manifest.get("price_basis") == "processed_transformed_prices":
+    if (run.manifest.get("research_mode", "strict") != "adjusted_price"
+            and run.manifest.get("price_basis") == "processed_transformed_prices"):
         ui.info("Execution and account values use the transformed price units of the selected processing pipeline.")
     delayed = {symbol: stamp for symbol, stamp in run.manifest.get("effective_starts", {}).items()
                if stamp > run.manifest.get("start", stamp)}

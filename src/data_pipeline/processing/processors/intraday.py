@@ -1,6 +1,6 @@
 """Session-open aligned intraday bars with explicit missing-minute policies."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import ClassVar
 import warnings
@@ -72,7 +72,7 @@ class ResampleIntraday(BaseProcessor):
     def output_contract(self, input_contract: DataContract) -> DataContract:
         if input_contract.timeframe != "1m":
             raise ProcessingError("Intraday resampling requires a 1m input contract.")
-        return DataContract(self.target_timeframe)
+        return replace(input_contract, timeframe=self.target_timeframe, timestamp_convention=None)
 
     def _intervals(self):
         duration = timedelta(minutes=30 if self.target_timeframe == "30m" else 60)

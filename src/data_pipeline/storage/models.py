@@ -5,6 +5,7 @@ from datetime import datetime
 import json
 
 from ..models import DataRequest
+from ..exceptions import DataIntegrityError, ProcessingError
 from ..processing.contracts import DataContract
 from ..quality import FetchQuality
 
@@ -27,6 +28,17 @@ class StoredDataset:
     supersedes: tuple[str, ...] = ()
     active: bool = True
     quality: FetchQuality = field(default_factory=FetchQuality)
+    source_basis: str = "unknown"
+    adjustment_json: str = ""
+
+    def __post_init__(self):
+        # Validate and canonicalize metadata on both publication and reload.
+        try:
+            contract = DataContract(self.request.timeframe, source_basis=self.source_basis,
+                                    adjustment_json=self.adjustment_json)
+        except ProcessingError as error:
+            raise DataIntegrityError(f"Invalid stored adjustment metadata: {error}") from error
+        object.__setattr__(self, "adjustment_json", contract.adjustment_json)
 
     @property
     def timestamp_convention(self) -> str:
@@ -34,8 +46,12 @@ class StoredDataset:
 
     @property
     def contract(self) -> DataContract:
-        return DataContract(timeframe=self.request.timeframe, dataset=self.request.dataset,
-                            schema_version=self.schema_version)
+        try:
+            return DataContract(timeframe=self.request.timeframe, dataset=self.request.dataset,
+                                schema_version=self.schema_version, source_basis=self.source_basis,
+                                adjustment_json=self.adjustment_json)
+        except ProcessingError as error:
+            raise DataIntegrityError(f"Invalid stored data contract: {error}") from error
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), default=lambda value: value.isoformat(), sort_keys=True)

@@ -7,6 +7,7 @@ import streamlit as st
 
 from data_pipeline import DataQuery
 from dashboard.charts import CHART_CONFIG, line_chart
+from dashboard.components.research_mode import research_mode_control, show_research_mode
 from dashboard.components.source_controls import _date_fields, _provider_choice, _tickers
 from dashboard.components.strategy_controls import strategy_specs
 from dashboard.pages.processing import backtest_memory, pipeline_label
@@ -27,9 +28,13 @@ def _show_result(run, *, ui=st):
         return show_factor_result(run, ui=ui)
     st = ui
     st.subheader(f"Run {run.run_id}")
+    show_research_mode(run.manifest, ui=st)
     warnings = run.manifest.get("warnings", [])
     if warnings:
-        st.warning("Early-close sessions were handled with a shorter trading period. See warnings below.")
+        if any(item.get("code") == "early_close" for item in warnings):
+            st.warning("Early-close sessions were handled with a shorter trading period. See warnings below.")
+        else:
+            st.warning("Review the backtest warnings and research assumptions below.")
         with st.expander("Backtest warnings", expanded=True):
             st.dataframe(pl.DataFrame(warnings), hide_index=True)
     ticker_errors = run.manifest.get("ticker_errors", [])
@@ -38,8 +43,12 @@ def _show_result(run, *, ui=st):
         st.warning(f"Skipped {count} problematic ticker(s). Results and capital allocation include only tickers that passed validation.")
         st.subheader("Skipped ticker errors")
         st.dataframe(pl.DataFrame(ticker_errors).select("ticker", "code", "message"), hide_index=True)
-    if run.manifest.get("price_basis") == "processed_transformed_prices":
+    if (run.manifest.get("research_mode", "strict") != "adjusted_price"
+            and run.manifest.get("price_basis") == "processed_transformed_prices"):
         st.info("This run executes at transformed prices. Cash, trade sizes, and account values use those transformed price units.")
+    return_caption = ("Cash-dividend adjustments are reflected in the price series; no additional dividend cash is credited."
+                      if run.manifest.get("research_mode") == "adjusted_price"
+                      else "Price returns exclude dividends.")
     portfolio_results = [result for result in run.results
                          if result.metadata.get("account_model", "").startswith("shared_cash_long_")]
     if any("long_short" in result.metadata.get("account_model", "") for result in run.results):
@@ -56,12 +65,12 @@ def _show_result(run, *, ui=st):
             ), hide_index=True)
         st.subheader("Per-ticker results")
     elif portfolio_results and len(portfolio_results) == len(run.results):
-        st.caption("Each strategy uses one shared cash account across all selected tickers. Price returns exclude dividends.")
+        st.caption("Each strategy uses one shared cash account across all selected tickers. " + return_caption)
     elif portfolio_results:
         st.caption("Portfolio strategies share cash across selected tickers; allocation strategies use an independent account per ticker. "
-                   "Each result is a separate simulation. Price returns exclude dividends.")
+                   "Each result is a separate simulation. " + return_caption)
     else:
-        st.caption("Each ticker has an independent account. Price returns exclude dividends; these are not shared-capital portfolio results.")
+        st.caption("Each ticker has an independent account; these are not shared-capital portfolio results. " + return_caption)
     st.dataframe(run.comparison, hide_index=True)
     st.caption("Return and drawdown metrics are fractions: 0.10 means 10%.")
     if run.manifest.get("skip_initial_missing_bars") or run.manifest.get("skip_problematic_tickers"):
@@ -90,6 +99,9 @@ def _show_result(run, *, ui=st):
         elif run.manifest.get("allocation_mode") == "fixed_tenth":
             st.caption(f"Each entry budgets {run.manifest.get('entry_percentage', '10')}% of initial capital, including costs. Unfunded signals are skipped; "
                        "later signals can trade after exits replenish cash. Simultaneous entries use ticker order.")
+        elif run.manifest.get("allocation_mode") == "holding_slots":
+            st.caption(f"Entry budget = current available cash ÷ available holdings ({run.manifest.get('initial_available_holdings', 25)} initially). "
+                       "Filled entries consume one slot; closed positions release one. Simultaneous entries use ticker order.")
         else:
             st.caption("Entry budget = available cash ÷ eligible tickers not currently held. "
                        "Same-open entries use the same cash snapshot; existing holdings are not rebalanced.")
@@ -162,6 +174,7 @@ def _render_backtest_page(research: Research, memory):
         return
     local = [item for item in local if item.request.provider == provider]
     pipeline_id = None
+    research_mode = "strict"
     if layer == "processed":
         pipeline_ids = sorted({item.pipeline_id for item in local})
         pipeline_labels = {value: pipeline_label(research, value, items=local) for value in pipeline_ids}
@@ -169,6 +182,7 @@ def _render_backtest_page(research: Research, memory):
                                     key="backtest-pipeline", format_func=pipeline_labels.get)
         local = [item for item in local if item.pipeline_id == pipeline_id]
         st.caption(f"Pipeline ID: {pipeline_id}. Preflight verifies its processors and raw-source lineage.")
+        research_mode = research_mode_control(memory, key="backtest-research-mode")
     timeframes = (list(BACKTEST_TIMEFRAMES) if layer == "raw" else
                   [value for value in BACKTEST_TIMEFRAMES if any(
                       item.request.timeframe == value for item in local)])
@@ -210,7 +224,7 @@ def _render_backtest_page(research: Research, memory):
         st.caption("Every ticker uses this same pipeline. Keep its raw parent files for lineage verification. "
                    "Choose a start date with enough earlier processed bars for strategy warm-up.")
     chosen = list(dict.fromkeys(tickers + _tickers(extra, provider)))
-    source_identity = (layer, provider, pipeline_id, timeframe, tuple(chosen), start, end, skip_initial_missing_bars,
+    source_identity = (layer, provider, pipeline_id, research_mode, timeframe, tuple(chosen), start, end, skip_initial_missing_bars,
                        skip_problematic_tickers, trading_period,
                        tuple(sorted(item.dataset_id for item in local
                                     if item.request.timeframe == timeframe and item.request.symbol in chosen)))
@@ -227,12 +241,19 @@ def _render_backtest_page(research: Research, memory):
     st.caption("Use USD-quoted equities on this calendar. Exchange and currency are explicit assumptions; "
                "they are not inferred from ticker names.")
     allocation_mode = memory.widget(
-        st.radio, "Capital allocation", options=["per_entry", "initial_split", "fixed_tenth"],
+        st.radio, "Capital allocation", options=["per_entry", "initial_split", "fixed_tenth", "holding_slots"],
         format_func={"per_entry": "Allocate at each entry (shared cash)",
                      "initial_split": "Split once at start (parallel tickers)",
-                     "fixed_tenth": "Fixed percentage of initial capital per entry"}.get,
+                     "fixed_tenth": "Fixed percentage of initial capital per entry",
+                     "holding_slots": "Available holdings (slots)"}.get,
         key="backtest-allocation-mode",
     )
+    initial_available_holdings = 25
+    if allocation_mode == "holding_slots":
+        initial_available_holdings = memory.widget(
+            st.number_input, "Initial holding slots", min_value=1, value=25, step=1,
+            key="backtest-holding-slots",
+        )
     entry_percentage = 10.0
     if allocation_mode == "fixed_tenth":
         entry_percentage = memory.widget(st.number_input, "Initial capital per entry (%)", min_value=0.01,
@@ -250,6 +271,11 @@ def _render_backtest_page(research: Research, memory):
         st.caption(f"Stop/target strategies budget {entry_percentage:g}% of initial capital per entry, including fees and slippage. "
                    "Skip signals when cash cannot cover the full allocation; later signals can use cash released by exits. "
                    "Simultaneous signals are considered in ticker order. Shared cash runs sequentially.")
+    elif allocation_mode == "holding_slots":
+        st.caption(f"Start with {initial_available_holdings} available holdings. Each filled entry budgets current cash divided by remaining slots, "
+                   "including costs, and consumes one slot. Each closed position releases a slot. "
+                   "Full capacity or rejected orders skip the entry without consuming a slot. "
+                   "Stop/target strategies only; simultaneous entries run in ticker order.")
     else:
         st.caption("Stop/target strategies use this initial cash once across all selected tickers, allocating free cash at each entry. "
                    "Other strategies retain a separate full-size account for each ticker. Shared cash runs sequentially.")
@@ -276,8 +302,9 @@ def _render_backtest_page(research: Research, memory):
             with st.spinner("Checking all datasets, then running strategies…"):
                 run = research.backtest(chosen, strategies=specs, start=start, end=end,
                                         timeframe=timeframe, provider=provider, settings=settings,
-                                        calendar="XNYS", layer=layer, pipeline_id=pipeline_id,
+                                        calendar="XNYS", layer=layer, pipeline_id=pipeline_id, research_mode=research_mode,
                                         allocation_mode=allocation_mode, max_workers=int(max_workers), entry_percentage=entry_percentage,
+                                        initial_available_holdings=initial_available_holdings,
                                         skip_initial_missing_bars=skip_initial_missing_bars,
                                         skip_problematic_tickers=skip_problematic_tickers, trading_period=trading_period)
             st.session_state["backtest-run"] = run
@@ -288,7 +315,7 @@ def _render_backtest_page(research: Research, memory):
             if report is not None:
                 st.dataframe(report.to_frame(), hide_index=True)
                 if report.warnings:
-                    st.warning("Early-close warnings")
+                    st.warning("Preflight warnings")
                     st.dataframe(pl.DataFrame(report.warnings), hide_index=True)
             else:
                 st.error(str(error))

@@ -104,7 +104,7 @@ class LocalDataStore:
                 processors_json = canonical_json
             except (TypeError, ValueError) as error:
                 raise RequestDataMismatchError(f"Invalid processing lineage: {error}") from error
-            contract = DataContract.from_request(parent.request) if output_contract is None else output_contract
+            contract = parent.contract if output_contract is None else output_contract
             if not isinstance(contract, DataContract):
                 raise RequestDataMismatchError("Processed output requires a DataContract.")
             canonical = contract.validate(frame)
@@ -124,7 +124,8 @@ class LocalDataStore:
                     )
             return self._write(connection, request, canonical, layer="processed",
                                pipeline_id=pipeline_id, processors_json=processors_json,
-                               parent_ids=parent_ids, quality=merge_quality([item.quality for item in parents]))
+                               parent_ids=parent_ids, quality=merge_quality([item.quality for item in parents]),
+                               output_contract=contract)
 
     def _raw_parents(self, connection, raw_ids: str | Sequence[str]) -> list[StoredDataset]:
         if isinstance(raw_ids, str):
@@ -140,6 +141,8 @@ class LocalDataStore:
             raise RequestDataMismatchError("Processing requires active raw input revisions.")
         if len({_identity(item.request) for item in items}) != 1:
             raise RequestDataMismatchError("Raw inputs must share dataset, provider, symbol and timeframe.")
+        if len({item.contract for item in items}) != 1:
+            raise RequestDataMismatchError("Raw inputs must share the same price adjustment contract.")
         return sorted(items, key=lambda item: (item.first_timestamp, item.dataset_id))
 
     def read_raw_inputs(self, raw_ids: str | Sequence[str]) -> tuple[list[StoredDataset], pl.DataFrame]:
@@ -289,7 +292,9 @@ class LocalDataStore:
                                quality=merge_quality([item.quality for item in items]))
 
     def _write(self, connection, request, frame, *, layer, pipeline_id="",
-               processors_json="[]", parent_ids=(), supersedes=(), quality=None) -> StoredDataset:
+               processors_json="[]", parent_ids=(), supersedes=(), quality=None,
+               output_contract=None) -> StoredDataset:
+        contract = DataContract.from_request(request) if output_contract is None else output_contract
         if quality is None:
             quality = FetchQuality()
         if not isinstance(quality, FetchQuality):
@@ -331,6 +336,7 @@ class LocalDataStore:
                 pipeline_id=pipeline_id, processors_json=processors_json,
                 parent_ids=tuple(parent_ids), supersedes=tuple(supersedes),
                 quality=quality,
+                source_basis=contract.source_basis, adjustment_json=contract.adjustment_json,
             )
             final.parent.mkdir(parents=True, exist_ok=True)
             connection.execute("BEGIN TRANSACTION")
@@ -445,6 +451,8 @@ class LocalDataStore:
             # Multiple symbols are fine; provider/timeframe/pipeline mixtures are ambiguous.
             if len({(identity[0][0], identity[0][1], identity[0][3], identity[1]) for identity in identities}) > 1:
                 raise RequestDataMismatchError("Narrow query to a single provider, timeframe and processor pipeline.")
+            if len({item.contract for item in items}) > 1:
+                raise RequestDataMismatchError("Query mixes incompatible price adjustment contracts.")
             paths = [str(self._verified_path(item)) for item in items]
             lazy = (pl.scan_parquet(paths, hive_partitioning=False) if paths
                     else pl.DataFrame(schema=OHLCV_SCHEMA).lazy())
