@@ -151,8 +151,28 @@ def test_typed_iso_dates_times_and_datetimes_preserve_offsets(tmp_path):
                             for name, kind in (("day", "date"), ("time", "time"), ("moment", "date-time"))})
     app, _ = controls_app(tmp_path, schema, settings)
     assert not app.exception and app.session_state["settings"] == settings
+    assert app.date_input(key="custom-day").value == date(2024, 1, 2)
+    app.date_input(key="custom-day").set_value(date(2024, 2, 29)).run()
+    assert app.session_state["settings"]["day"] == "2024-02-29"
     app.text_input(key="custom-time").set_value("10:00:00+08:00").run()
     assert app.session_state["settings"]["time"] == "10:00:00+08:00"
+
+
+def test_date_picker_preserves_old_text_widget_value_and_reopens(tmp_path):
+    schema = object_schema({"last_trading_day": {"type": "string", "format": "date"}})
+    app, script = controls_app(tmp_path, schema, {"last_trading_day": "2024-01-02"})
+    memory = app.session_state["memory"]
+    memory.values["widgets"]["custom-last_trading_day"] = "1927-01-03"
+    memory.save()
+    app.run()
+    assert not app.exception and not app.error
+    assert app.date_input(key="custom-last_trading_day").value == date(1927, 1, 3)
+    assert app.session_state["settings"] == {"last_trading_day": "1927-01-03"}
+    app.date_input(key="custom-last_trading_day").set_value(date(2026, 10, 23)).run()
+    reopened = AppTest.from_string(script, default_timeout=15).run()
+    assert not reopened.exception and not reopened.error
+    assert reopened.date_input(key="custom-last_trading_day").value == date(2026, 10, 23)
+    assert reopened.session_state["settings"] == {"last_trading_day": "2026-10-23"}
 
 
 def test_actual_builtin_schemas_render_and_validate(tmp_path):

@@ -45,6 +45,8 @@ def _text_result(result, integrity=None):
         data["implementation_fingerprint"] = result.data["implementation_fingerprint"]
     if "analysis" in result.data:
         data["analysis"] = {"text": result.data["analysis"].get("text", [])}
+        if "screening_table" in result.data["analysis"]:
+            data["analysis"]["screening_table"] = result.data["analysis"]["screening_table"]
     messages = list(result.messages)
     if integrity is not None:
         data["data_integrity"] = integrity
@@ -90,7 +92,8 @@ class BatchRunner:
                     fingerprint = ""
             result[spec.instance_id] = {"name": spec.name, "version": spec.version,
                 "label": definition.label, "result_version": definition.result_version,
-                "implementation_fingerprint": fingerprint}
+                "implementation_fingerprint": fingerprint,
+                "screening": bool(definition.schema.get("x-batch-screening", False))}
         return result
 
     def create(self, request, specs):
@@ -243,6 +246,13 @@ class BatchRunner:
                                 metrics = infer_metrics(result["tables"])
                                 summaries[identifier] = {"metrics": [item.to_dict() for item in metrics],
                                                          "values": extract_metrics(result["tables"], metrics)}
+                                screen = result.get("data", {}).get("analysis", {}).get("screening_table")
+                                if screen is not None:
+                                    tables = [table for table in result["tables"] if table["name"] == screen]
+                                    if len(tables) != 1 or len(tables[0]["rows"]) > 1:
+                                        raise ValueError("A ticker screen must provide zero or one matching row.")
+                                    summaries[identifier].update(screening_table=screen,
+                                        screening_row=next(iter(tables[0]["rows"]), None))
                             except (TypeError, ValueError) as error:
                                 # Keep unusual/custom tables accessible even when
                                 # automatic metric selection cannot interpret them.

@@ -60,6 +60,7 @@ class AnalysisResult:
         self._overlays = []
         self._events = []
         self._groups = set()
+        self._screening_table = None
 
     def text(self, markdown):
         """Add Markdown; the dashboard renders it without enabling raw HTML."""
@@ -76,6 +77,15 @@ class AnalysisResult:
         frame = _frame(frame)
         self._tables.append(json_copy({"name": name, "columns": frame.columns,
                                        "rows": _json(frame.to_dicts())}))
+        return self
+
+    def screen(self, name, frame):
+        """Return zero or one matching row; batch results retain input ticker order."""
+        frame = _frame(frame)
+        if self._screening_table is not None or frame.height > 1:
+            raise ValueError("A ticker screen requires one table with zero or one matching row.")
+        self.table(name, frame)
+        self._screening_table = name
         return self
 
     def _position(self, value):
@@ -210,4 +220,6 @@ class AnalysisResult:
                                                 "layers": [{key: item[key] for key in ("id", "name", "type")}
                                                            for item in self._overlays]},
                                    "metadata": json_copy(_json(self._context.metadata))})
+        if self._screening_table is not None:
+            result.data["analysis"]["screening_table"] = self._screening_table
         return result.validate()

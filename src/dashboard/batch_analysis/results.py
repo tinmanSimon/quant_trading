@@ -272,6 +272,16 @@ def _details(store, manifest, instance_id, spec, tickers, prefix):
         st.json(spec)
 
 
+def screening_rows(manifest, instance_id):
+    """Use the saved request list, independent of JSON key or worker completion order."""
+    rows = []
+    for ticker in manifest["request"]["tickers"]:
+        row = manifest["tickers"][ticker].get("summaries", {}).get(instance_id, {}).get("screening_row")
+        if row is not None:
+            rows.append({**row, "ticker": ticker})
+    return rows
+
+
 def render_run_results(store, manifest, memory, *, active=False):
     counts = manifest["counts"]
     completed = sum(counts.get(key, 0) for key in ("completed", "partial", "failed", "no_data", "cancelled"))
@@ -302,6 +312,27 @@ def render_run_results(store, manifest, memory, *, active=False):
                                     f"{specifications[value]['name']} · {list(specifications).index(value) + 1}"),
                                 key=prefix + "-instance")
     prefix += "-" + instance_id
+    if (manifest.get("implementations", {}).get(instance_id, {}).get("screening")
+            or any("screening_table" in entry.get("summaries", {}).get(instance_id, {})
+                   for entry in manifest["tickers"].values())):
+        rows = screening_rows(manifest, instance_id)
+        st.subheader("Matching tickers")
+        st.caption(f"{len(rows):,} matches, in the original ticker order.")
+        if rows:
+            st.dataframe(pl.DataFrame(rows, infer_schema_length=None), hide_index=True, width="stretch")
+        else:
+            st.info("No matching tickers in the completed results.")
+        issues = {ticker: entry.get("error") or "Analysis failed."
+                  for ticker, entry in manifest["tickers"].items()
+                  if entry.get("analysis_status", {}).get(instance_id) in {"failed", "partial"}}
+        if issues:
+            with st.expander(f"Analysis errors ({len(issues)})"):
+                for ticker, error in issues.items():
+                    st.error(f"{ticker}: {error}")
+        _details(store, manifest, instance_id, specifications[instance_id],
+                 [row["ticker"] for row in rows], prefix)
+        memory.save()
+        return
     saved = manifest.get("aggregation", {}).get("instances", {}).get(instance_id)
     summary_error = False
     try:

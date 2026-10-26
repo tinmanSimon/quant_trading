@@ -20,7 +20,8 @@ TOOLKIT_VERSION = "1"
 _METADATA = "__research_analysis__"
 
 
-def analysis(name, *, label=None, description=None, version="1", parameters=None, uses_cutoff=False):
+def analysis(name, *, label=None, description=None, version="1", parameters=None, uses_cutoff=False,
+             screening=False):
     """Declare an analysis without wrapping or changing its Python function.
 
     The first argument is an AnalysisContext; remaining arguments are settings.
@@ -35,6 +36,8 @@ def analysis(name, *, label=None, description=None, version="1", parameters=None
             raise ValueError("Analysis names and versions must be nonempty alphanumeric identifiers.")
     if type(uses_cutoff) is not bool:
         raise ValueError("uses_cutoff must be a boolean.")
+    if type(screening) is not bool:
+        raise ValueError("screening must be a boolean.")
     if label is not None and (not isinstance(label, str) or not label.strip()):
         raise ValueError("Analysis labels must be nonempty strings.")
     if description is not None and not isinstance(description, str):
@@ -66,6 +69,8 @@ def analysis(name, *, label=None, description=None, version="1", parameters=None
             raise ValueError("Parameter metadata must describe declared function settings.")
         configuration.config_schema = {"properties": overrides}
         schema = configuration_schema(configuration)
+        if screening:
+            schema["x-batch-screening"] = True
         setattr(function, _METADATA, {"name": name, "version": version,
                                      "label": label or name.replace("_", " ").title(),
                                      "description": description if description is not None else inspect.getdoc(function) or "",
@@ -102,7 +107,10 @@ def run_script(function, context, **settings):
     result = function(context, **values)
     if not isinstance(result, AnalysisResult):
         raise TypeError("An analysis script must return ctx.result() with text or tables.")
-    return result.to_logic_result()
+    output = result.to_logic_result()
+    if getattr(function, _METADATA)["schema"].get("x-batch-screening") and not output.data["analysis"].get("screening_table"):
+        raise ValueError("A screening analysis must return ctx.result().screen(name, matching_rows).")
+    return output
 
 
 def _layers(result):

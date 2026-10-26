@@ -192,6 +192,25 @@ def _field(label, schema, value, memory, key, bounds, context=None, *, disabled=
         st.caption(f"{label}: null")
         return None
     if kind == "string":
+        if schema.get("format") == "date":
+            # Older forms stored ISO text under this same widget key. Migrate
+            # it before MarketMemory restores the date picker, preserving edits.
+            initial = memory.values["widgets"].get(key, value)
+            if initial is _MISSING or initial is None or initial == "":
+                initial = date.today()
+            if isinstance(initial, str):
+                try:
+                    initial = date.fromisoformat(initial)
+                except ValueError:
+                    st.warning(f"{label}: the saved value is not a valid date. Select a date below.")
+                    initial = date.today()
+            if type(initial) is not date:
+                raise ValueError(f"{label}: expected a calendar date.")
+            memory.values["widgets"][key] = initial
+            selected = memory.widget(st.date_input, label, value=initial, key=key,
+                                     min_value=date(1000, 1, 1), max_value=date.max,
+                                     disabled=disabled, help=schema.get("description"))
+            return selected.isoformat()
         return memory.widget(st.text_input, label, value="" if value is _MISSING or value is None else str(value), key=key,
                              disabled=disabled,
                              help=schema.get("description") or (

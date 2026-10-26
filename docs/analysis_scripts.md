@@ -215,6 +215,12 @@ Python use, then finalize its builder.
 
 ## Multi-ticker analysis and saved runs
 
+For a ticker screen, declare `@analysis(..., screening=True)` and return
+`ctx.result().screen("Matching ticker", matching_rows)`, where `matching_rows`
+contains zero or one row. The Analysis page shows only matches, in the original
+request's ticker order, including after saving/reopening. Calculation errors
+remain available separately. Ordinary analyses retain their summary/ranking view.
+
 The dashboard's **Analysis** page runs the same analyses across a selected list
 of local tickers. Choose the provider, timeframe, raw or processed series, date
 range, and tickers (including pasted lists or all available tickers). Add one or
