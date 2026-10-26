@@ -186,3 +186,58 @@ def test_validator_rejects_empty_data(sample_ohlcv_frame: pl.DataFrame) -> None:
 def test_validator_rejects_non_dataframe_input() -> None:
     with pytest.raises(SchemaValidationError, match="Polars DataFrame"):
         validate_ohlcv("not a dataframe")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("changes,reason", [
+    ({"open": 0.}, "open must be greater than zero"),
+    ({"high": -1.}, "high must be greater than zero"),
+    ({"low": 0.}, "low must be greater than zero"),
+    ({"close": -1.}, "close must be greater than zero"),
+    ({"low": 105.}, "low exceeds high"),
+    ({"open": 98.}, "low exceeds open"),
+    ({"open": 103.}, "open exceeds high"),
+    ({"close": 98.}, "low exceeds close"),
+    ({"close": 103.}, "close exceeds high"),
+    ({"volume": -1.}, "volume must be greater than or equal to zero"),
+])
+def test_invalid_bar_reports_values_timestamp_and_specific_rule(sample_ohlcv_frame, changes, reason):
+    frame = sample_ohlcv_frame.head(1).with_columns(
+        pl.lit(value).alias(column) for column, value in
+        {"open": 100., "high": 102., "low": 99., "close": 101., "volume": 1000., **changes}.items())
+    before = frame.clone()
+    with pytest.raises(InvalidOHLCVError) as error:
+        validate_ohlcv(frame)
+    message = str(error.value)
+    assert "Found 1 invalid rows" in message
+    assert f"AAPL at {frame['timestamp'][0].isoformat()}" in message
+    assert f"{reason}: 1" in message
+    assert reason in message.split("reasons: ")[1]
+    for column, value in changes.items():
+        assert f"{column}={value!r}" in message
+    assert_frame_equal(frame, before)
+
+
+def test_validation_reports_mixed_bad_rows_together_without_spurious_nan_comparisons(sample_ohlcv_frame):
+    frame = sample_ohlcv_frame.with_columns(
+        pl.Series("close", [None, math.nan, 10000.], dtype=pl.Float64),
+        pl.Series("volume", [0., -1., 1000.]),
+    )
+    with pytest.raises(InvalidOHLCVError) as error:
+        validate_ohlcv(frame)
+    message = str(error.value)
+    assert "Found 3 invalid rows" in message
+    assert "close is missing (null): 1" in message
+    assert "close is not finite: 1" in message
+    assert "volume must be greater than or equal to zero: 1" in message
+    assert "close exceeds high: 1" in message
+    for stamp in frame["timestamp"]:
+        assert stamp.isoformat() in message
+
+
+def test_duplicate_error_identifies_key_and_occurrence_count(sample_ohlcv_frame):
+    frame = pl.concat([sample_ohlcv_frame.head(1)] * 3 + [sample_ohlcv_frame.tail(2)])
+    with pytest.raises(DuplicateBarError) as error:
+        validate_ohlcv(frame)
+    message = str(error.value)
+    assert "1 duplicate keys across 3 rows" in message
+    assert f"AAPL at {frame['timestamp'][0].isoformat()}: 3 occurrences" in message

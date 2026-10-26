@@ -1,6 +1,6 @@
 """Filter intraday bars by a recurring local-clock window without altering bars."""
 from dataclasses import dataclass
-from datetime import time
+from datetime import time, timedelta
 from typing import ClassVar
 from zoneinfo import ZoneInfo, available_timezones
 
@@ -67,6 +67,38 @@ class TimeWindowFilter(BaseProcessor):
     def _validate_input(self, frame, input_contract):
         # The shared wrapper validates OHLCV; output_contract checks intraday semantics.
         pass
+
+    def validate_backtest_calendar(self, bars, *, input_contract, output_contract):
+        """Reject selected output intervals whose required inputs are filtered.
+
+        This also runs when a later processor aggregates into longer bars. A
+        complete raw parent cannot prove that those intermediate inputs survived
+        this filter, even if the final aggregation has an output for every day.
+        """
+        BaseProcessor.validate_backtest_calendar(self, bars, input_contract=input_contract,
+                                                output_contract=output_contract)
+        self.output_contract(input_contract)
+        timeframe = input_contract.timeframe
+        duration = timedelta(minutes=int(timeframe[:-1]) * (60 if timeframe.endswith("h") else 1))
+        zone = ZoneInfo(self.timezone)
+        missing, examples = 0, []
+        for bar in bars:
+            stamp = bar.open
+            while stamp < bar.close:
+                clock = stamp.astimezone(zone).time()
+                included = (self.start_time <= clock < self.end_time if self.start_time < self.end_time
+                            else clock >= self.start_time or clock < self.end_time)
+                if not included:
+                    missing += 1
+                    if len(examples) < 5:
+                        examples.append(stamp.isoformat())
+                stamp += duration
+        if missing:
+            raise ProcessingError(
+                f"Time-window filter removes {missing} required {timeframe} source bars from selected "
+                f"trading/warm-up intervals (UTC): {', '.join(examples)}. "
+                "Later aggregation cannot establish complete source coverage after those exclusions."
+            )
 
     def _window_mask(self):
         clock = pl.col("timestamp").dt.convert_time_zone(self.timezone).dt.time()

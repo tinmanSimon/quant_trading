@@ -1,6 +1,7 @@
 """The dashboard fetches through the pipeline and displays every ticker outcome."""
 
-from datetime import timedelta
+from calendar import monthrange
+from datetime import date, timedelta
 
 import polars as pl
 from polars.testing import assert_frame_equal
@@ -13,6 +14,42 @@ from data_pipeline.providers import YFinanceProvider
 from research import Research
 
 
+def test_dashboard_exclude_invalid_bars_is_opt_in_and_saves_omissions(tmp_path, monkeypatch):
+    import pandas as pd
+    from data_pipeline.providers import yahoo
+
+    research = Research(tmp_path / "data", tmp_path / "runs")
+    frame = pd.DataFrame({"Open": [100., 0., 100.], "High": [101.] * 3,
+                          "Low": [99.] * 3, "Close": [100.] * 3, "Volume": [10.] * 3},
+                         index=pd.date_range("2024-01-02", periods=3, tz="America/New_York"))
+    monkeypatch.setattr(yahoo, "_download_history", lambda **kwargs: frame.copy())
+    app = AppTest.from_string(f"""
+from research import Research
+from dashboard.pages.fetch import _fetch_page
+_fetch_page(Research({str(research.pipeline.store.data_dir)!r}, {str(research.runs_dir)!r}))
+""").run()
+    app.selectbox(key="fetch-provider").set_value("yahoo").run()
+    app.selectbox(key="fetch-timeframe").set_value("1d").run()
+    app.text_area[0].set_value("TEST")
+    app.date_input(key="fetch-start").set_value(date(2024, 1, 2))
+    app.date_input(key="fetch-end").set_value(date(2024, 1, 5))
+    assert app.checkbox(key="fetch-skip-invalid-bars").value is False
+    next(button for button in app.button if button.label == "Fetch and save").click().run()
+    assert app.session_state["fetch-report"].outcomes[0].status == "failed"
+    app.checkbox(key="fetch-skip-invalid-bars").check()
+    with pytest.warns(UserWarning, match="excluded 1 invalid bars"):
+        next(button for button in app.button if button.label == "Fetch and save").click().run()
+    assert not app.exception and not app.error
+    outcome = app.session_state["fetch-report"].outcomes[0]
+    assert outcome.status == "saved" and outcome.row_count == 2
+    assert outcome.quality["skip_invalid_bars"] is True
+    bar, = outcome.quality["omitted_bars"]
+    assert bar["timestamp"] == "2024-01-03T00:00:00+00:00"
+    assert "open=0.0" in bar["reason"]
+    assert any("1 invalid-bar exclusions" in item.value for item in app.warning)
+    assert any(item.label == "Excluded invalid bars" for item in app.expander)
+
+
 @pytest.mark.parametrize("skip", [False, True])
 def test_dashboard_batch_fetch_uses_pipeline_and_keeps_later_successes(
     tmp_path, monkeypatch, sample_ohlcv_frame, skip,
@@ -22,6 +59,7 @@ def test_dashboard_batch_fetch_uses_pipeline_and_keeps_later_successes(
     research = Research(tmp_path / "data", tmp_path / "runs")
     monkeypatch.setattr(dashboard, "Research", lambda **kwargs: research)
     calls = []
+    requested_starts = []
     policies = []
     fetch_many = research.pipeline.fetch_many
 
@@ -33,6 +71,7 @@ def test_dashboard_batch_fetch_uses_pipeline_and_keeps_later_successes(
 
     def fetch_result(provider, request):
         calls.append((request.symbol, provider.skip_missing_ohlc))
+        requested_starts.append(request.start.date())
         if request.symbol == "BAD":
             raise ProviderError("synthetic Yahoo failure")
         frame = sample_ohlcv_frame.with_columns(pl.lit(request.symbol).alias("symbol"))
@@ -45,13 +84,20 @@ def test_dashboard_batch_fetch_uses_pipeline_and_keeps_later_successes(
     app.text_area[0].set_value("aapl, BAD, MSFT")
     app.selectbox(key="fetch-timeframe").set_value("1h")
     day = sample_ohlcv_frame["timestamp"][0].date()
-    app.date_input(key="fetch-start").set_value(day)
+    today = date.today()
+    earliest = today.replace(year=today.year - 100,
+                             day=min(today.day, monthrange(today.year - 100, today.month)[1]))
+    assert app.date_input(key="fetch-start").min == earliest
+    assert app.date_input(key="fetch-end").min == earliest
+    requested_start = earliest if skip else day
+    app.date_input(key="fetch-start").set_value(requested_start)
     app.date_input(key="fetch-end").set_value(day + timedelta(days=1))
     app.checkbox[0].set_value(skip)
     assert app.selectbox(key="fetch-overlap-policy").value == "Fail on overlap"
     next(button for button in app.button if button.label == "Fetch and save").click().run()
     assert not app.exception
     assert calls == [("AAPL", skip), ("BAD", skip), ("MSFT", skip)]
+    assert requested_starts == [requested_start] * 3
     assert policies == ["error"]
     report = app.session_state["fetch-report"]
     assert [item.status for item in report.outcomes] == ["saved", "failed", "saved"]

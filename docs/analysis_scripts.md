@@ -221,6 +221,13 @@ range, and tickers (including pasted lists or all available tickers). Add one or
 more analyses, configure their settings, then click **Run analysis**. Different
 instances of an analysis retain independent settings and summaries.
 
+The built-in **Flat-period bar statistics** analysis first detects disjoint flat
+periods for each ticker, then reports red-bar and all-bar high-threshold counts
+and within-period close-to-close return volatility, for both the full range and
+the last calendar month ending at the latest completed source bar. Its high threshold is a
+direct percentage of open: 102 means `high > open × 1.02`. See
+[Flat-period bar statistics](flat_bar_statistics.md) for its settings and formulas.
+
 The page displays overall metrics, a ranked ticker summary, and original text
 and tables for the selected ticker. It does not render charts. Category/count
 tables, such as `outcome` / `count`, automatically become summable metrics.
@@ -237,6 +244,34 @@ Earlier available bars supply indicator initialization history just as in Market
 data; the chosen date range bounds the reported analysis. There are no automatic
 downloads or backtest portfolio/account rules. Missing data and calculation
 failures are reported independently; successful analyses remain available.
+
+**Strict data validation** is optional: it defaults off for Yahoo and on for
+Databento, with separate per-provider preferences. Set `strict_validation=True`
+or `False` on `BatchRequest` to override it. `calendar="XNYS"` selects the default
+U.S. regular-session grid; the calendar is an explicit assumption, not automatic
+exchange discovery. Strict validation checks the exact frozen revisions before
+running scripts, including all supplied initialization history, missing or
+off-grid timestamps, unfinished bars, and the immutable raw parents behind
+processed outputs. Intermediate time-window filters must preserve required
+inputs. No bars are filled or removed by validation.
+
+The supported strict grids match research preflight (`1m`, `2m`, `5m`, `15m`,
+`30m`, `1h`, `90m`, `1d`). Extended-hours bars and unsupported grids fail with
+an explanation; they remain usable in screening mode. Static analysis does not
+inherit the backtest's causality or return-model restrictions on processors,
+but their contracts and calendar mappings must be verifiable. Arbitrary custom
+processors must validate their own dependency windows and timestamp mappings.
+Exchange-close completion is checked; analysis inputs retain their existing,
+more conservative completion rules.
+
+Explicit start/end bounds require the full scheduled interval. If a bound is
+omitted in Python, validation checks the available span and records that limited
+scope; it cannot certify history outside it. Saved ticker details include a
+`data_integrity` report with checked bounds, calendar, source IDs, and status.
+Screening results keep known omission warnings, including initialization gaps;
+absence of warnings does not prove completeness. Neither mode can establish
+the economic accuracy of otherwise valid vendor prices. Older saved runs are
+not relabeled as strictly validated.
 
 **Concurrent tickers** bounds the number of loaded ticker histories. The default
 is one. Increasing it can help workloads that release Python's GIL, but uses

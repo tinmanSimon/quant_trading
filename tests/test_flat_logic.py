@@ -252,7 +252,7 @@ def test_processed_batch_preserves_final_periods_and_completed_30m_cutoff(
     store = BatchStore(tmp_path / "results")
     manifest = BatchRunner(pipeline, registry, store).execute(BatchRequest(
         ("TEST",), provider="databento", timeframe="30m", layer="processed",
-        pipeline_id=fingerprint, as_of=cutoff), [spec])
+        pipeline_id=fingerprint, as_of=cutoff, strict_validation=False), [spec])
     assert manifest["counts"]["completed"] == 1
     assert manifest["sources"]["TEST"][0]["dataset_id"] == processed.dataset_id
     assert manifest["specs"][0]["config"]["max_duration"] == maximum

@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 from hashlib import sha256
 from pathlib import Path
+import json
 
 import polars as pl
 import streamlit as st
@@ -21,6 +22,7 @@ from dashboard.market_data.navigation import analysis_events
 from dashboard.market_data.chart_view import render_chart_view
 from dashboard.state.workspace import market_memory
 from research.analysis import LogicContext
+from research.analysis.core.omissions import omission_metadata
 from research import Research
 from research.timeframes import INTRADAY_DURATIONS
 
@@ -35,10 +37,12 @@ def _metadata_rows(items):
     } for item in items]
 
 
-def _quality(items, start, end, *, present_timestamps=(), show_details=True, ui=st):
+def _quality(items, start, end, *, present_timestamps=(), show_details=True, ui=st,
+             quality_metadata=None):
     """Show recorded omissions without treating old metadata as proof of completeness."""
     st = ui
     omitted = []
+    processed = []
     unknown = []
     present = set(present_timestamps)
     for item in items:
@@ -46,6 +50,9 @@ def _quality(items, start, end, *, present_timestamps=(), show_details=True, ui=
         if quality is None or quality.status == "unknown":
             unknown.append(item.dataset_id)
         if quality is None:
+            continue
+        if getattr(item, "layer", "raw") == "processed":
+            processed.extend((bar, item.dataset_id) for bar in quality.omitted_bars)
             continue
         for bar in quality.omitted_bars:
             if start <= bar.timestamp < end:
@@ -63,10 +70,30 @@ def _quality(items, start, end, *, present_timestamps=(), show_details=True, ui=
                 "timestamp_utc": bar.timestamp, "reason": bar.reason, "dataset_id": dataset_id,
                 "current_state": "present in selected data" if bar.timestamp in present else "absent from selected data",
             } for bar, dataset_id in omitted]), hide_index=True)
+    if processed:
+        # Parent timestamps and resampled output labels are different domains.
+        # Only verified raw parent contents can establish a historical repair.
+        unresolved = ({stamp for source in quality_metadata.get("processed_omission_sources", [])
+                       for stamp in source["omitted_bar_timestamps"]}
+                      if quality_metadata is not None else
+                      {bar.timestamp.isoformat() for bar, _ in processed})
+        if unresolved:
+            st.warning(f"Processed data has {len(unresolved)} unresolved omitted raw-input bars. "
+                       "Their effect on output bars has not been verified. Flat analysis is unavailable "
+                       "until those source omissions are resolved; output timestamps do not establish repairs.")
+        else:
+            st.info("Previously omitted source bars are present in the verified raw parents. "
+                    "Their omission records are historical.")
+        if show_details:
+            st.dataframe(pl.DataFrame([{
+                "raw_timestamp_utc": bar.timestamp, "reason": bar.reason, "dataset_id": dataset_id,
+                "current_state": ("unresolved in raw inputs" if bar.timestamp.isoformat() in unresolved
+                                  else "present in verified raw inputs"),
+            } for bar, dataset_id in processed]), hide_index=True)
     if unknown:
         st.caption(f"Omission history is unavailable for {len(unknown)} selected revision(s). "
                    "Valid stored values and first/last bounds do not establish complete coverage.")
-    elif not omitted:
+    elif not omitted and not processed:
         st.caption("No ingestion omissions were recorded in this window. Backtest preflight checks expected bar coverage separately.")
     return sorted({bar.timestamp for bar, _ in omitted if bar.timestamp not in present})
 
@@ -148,7 +175,9 @@ def _render_data_page(research: Research, memory, *, render_chart=render_series_
     query = DataQuery(layer=layer, provider=identity[0], symbol=symbol, timeframe=identity[1],
                       pipeline_id=identity[2] or None, start=start, end=end)
     dataset_id = selected[0].dataset_id if mode == "One exact revision" else None
-    omitted = [bar.timestamp for item in selected if item.quality is not None
+    quality_metadata = omission_metadata([json.loads(item.to_json()) for item in selected],
+                                         pipeline=research.pipeline)
+    omitted = [bar.timestamp for item in selected if item.quality is not None and item.layer == "raw"
                for bar in item.quality.omitted_bars if start <= bar.timestamp < end]
     cache = st.session_state.get("market-chart-cache")
     if not isinstance(cache, BoundedChartCache):
@@ -159,9 +188,10 @@ def _render_data_page(research: Research, memory, *, render_chart=render_series_
                         session_timezone=session_timezone, omitted_timestamps=omitted, include_support=True)
     with memory.widget(st.expander, "Dataset metadata", key="browse-metadata-open"):
         st.dataframe(pl.DataFrame(_metadata_rows(selected)), hide_index=True)
-    show_details = bool(omitted) and memory.widget(st.checkbox, "Show omission details", key="browse-omission-details")
+    has_omissions = bool(omitted) or any(item.layer == "processed" and item.quality.omitted_bars for item in selected)
+    show_details = has_omissions and memory.widget(st.checkbox, "Show omission details", key="browse-omission-details")
     _quality(selected, start, end, present_timestamps=series.timestamps if series else (),
-             show_details=show_details)
+             show_details=show_details, quality_metadata=quality_metadata)
     if series is None:
         st.info("No saved bars fall inside this window.")
         return
@@ -180,7 +210,8 @@ def _render_data_page(research: Research, memory, *, render_chart=render_series_
     logic_identity = (str(research.pipeline.store.data_dir), query, dataset_id,
                       tuple(item.to_json() for item in sorted(selected, key=lambda item: item.dataset_id)))
     context = LogicContext(frame=series.frame, timeframe=identity[1], identity=logic_identity,
-                           cutoff=cutoff, session_timezone=session_timezone, support_frame=series.support_frame)
+                           cutoff=cutoff, session_timezone=session_timezone, support_frame=series.support_frame,
+                           metadata=quality_metadata)
     # A stable container prevents conditional controls from moving the chart's
     # Streamlit element path, unmounting it, and losing browser-local navigation.
     with st.container():
@@ -218,5 +249,3 @@ def _render_data_page(research: Research, memory, *, render_chart=render_series_
                        data=partial(csv_export, research.pipeline, query, dataset_id),
                        file_name=f"{symbol}-{identity[1]}.csv", mime="text/csv",
                        key=f"browse-csv-{chart_id}", on_click="ignore")
-
-

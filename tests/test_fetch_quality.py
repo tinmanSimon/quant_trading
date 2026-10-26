@@ -41,7 +41,7 @@ class ReportedProvider(BaseDataProvider):
 def test_quality_survives_restart_processing_and_refetch(tmp_path, sample_ohlcv_frame, request_data):
     quality = FetchQuality("reported", True, (
         OmittedBar(request_data.start + timedelta(hours=1), "all_ohlc_missing"),
-    ), "fixture/1")
+    ), "fixture/1", skip_invalid_bars=True)
     provider = ReportedProvider(sample_ohlcv_frame[::2], quality)
     pipeline = DataPipeline(tmp_path, providers=ProviderRegistry({"yahoo": provider}))
     result = pipeline.ingest(request_data, processors=[ScalePrices(2)])
@@ -68,6 +68,7 @@ def test_manual_data_and_legacy_metadata_are_explicitly_unknown(tmp_path, sample
     old = StoredDataset.from_json(json.dumps(fields), active=True)
     assert old.quality.status == "unknown"
     assert old.quality.skip_missing_ohlc is None
+    assert old.quality.skip_invalid_bars is None
 
 
 def test_legacy_provider_default_result_does_not_claim_reported_quality(sample_ohlcv_frame, request_data):
@@ -83,7 +84,7 @@ def test_compaction_retains_source_provenance(tmp_path, sample_ohlcv_frame, requ
     pipeline = DataPipeline(tmp_path)
     omitted = OmittedBar(request_data.start + timedelta(minutes=30), "all_ohlc_missing")
     first = pipeline.store.write_raw(request_data, sample_ohlcv_frame.head(1),
-                                    quality=FetchQuality("reported", True, (omitted,)))
+                                    quality=FetchQuality("reported", True, (omitted,), skip_invalid_bars=True))
     second = pipeline.store.write_raw(request_data, sample_ohlcv_frame.tail(1),
                                      quality=FetchQuality("reported", False))
     ids = [first.dataset_id, second.dataset_id]
@@ -91,6 +92,7 @@ def test_compaction_retains_source_provenance(tmp_path, sample_ohlcv_frame, requ
     assert merged.quality.status == "reported"
     assert merged.quality.omitted_bars == (omitted,)
     assert merged.quality.skip_missing_ohlc is True
+    assert merged.quality.skip_invalid_bars is True
     assert set(merged.supersedes) == set(ids)
     assert pipeline.get_metadata(merged.dataset_id).quality == merged.quality
     unknown = merge_quality([merged.quality, FetchQuality()])

@@ -63,7 +63,10 @@ def test_fetch_menu_uses_selected_capabilities_and_preserves_symbol_case(tmp_pat
     assert research.pipeline.list_datasets()[0].request.provider == 'other'
     app.selectbox(key='fetch-provider').set_value('yahoo').run()
     assert '1h' in app.selectbox(key='fetch-timeframe').options
-    assert len(app.checkbox) == 1
+    assert {item.label for item in app.checkbox} == {
+        'Skip bars where every OHLC price is missing', 'Exclude invalid bars',
+    }
+    assert all(item.value is False for item in app.checkbox)
     assert 'fetch-report' not in app.session_state
 
 

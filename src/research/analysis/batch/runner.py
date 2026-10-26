@@ -15,6 +15,7 @@ from data_pipeline import DataQuery
 
 from ..core.base import LogicContext, LogicSpec, json_copy
 from ..core.runner import LogicRunner
+from ..core.omissions import omission_metadata, omission_report
 from .models import BatchRequest, status_counts
 
 
@@ -35,7 +36,7 @@ def _engine_fingerprint():
     return digest.hexdigest()
 
 
-def _text_result(result):
+def _text_result(result, integrity=None):
     """Keep the existing text/table contract; omit chart and navigation archives."""
     data = {}
     if "metadata" in result.data:
@@ -44,8 +45,12 @@ def _text_result(result):
         data["implementation_fingerprint"] = result.data["implementation_fingerprint"]
     if "analysis" in result.data:
         data["analysis"] = {"text": result.data["analysis"].get("text", [])}
+    messages = list(result.messages)
+    if integrity is not None:
+        data["data_integrity"] = integrity
+        messages.extend(message for message in integrity.get("messages", []) if message not in messages)
     return json_copy({"overlays": [], "tables": result.tables,
-                      "messages": result.messages, "data": data})
+                      "messages": messages, "data": data})
 
 
 class BatchRunner:
@@ -149,10 +154,32 @@ class BatchRunner:
                         request.timeframe, request.layer, request.pipeline_id,
                         request.start, request.end, tuple(item["dataset_id"] for item in sources))
             context = LogicContext(selected, request.timeframe, identity, cutoff,
-                                   session_timezone=request.session_timezone, support_frame=support)
+                                   session_timezone=request.session_timezone, support_frame=support,
+                                   metadata=omission_metadata(sources, pipeline=self.pipeline))
+            integrity = omission_report(context, start=request.start, end=request.end)
+            if support is not None and not support.is_empty():
+                initialization = omission_report(replace(context, frame=support, support_frame=None,
+                    metadata={"omitted_bar_timestamps": context.metadata["omitted_bar_timestamps"]}),
+                    end=request.start)
+                integrity["initialization_omissions"] = initialization
+                integrity["messages"].extend(message.replace("selected data", "initialization history")
+                                              for message in initialization["messages"])
+            integrity["validation"] = {"status": "not_checked"}
+            payload["data_integrity"] = integrity
+            if request.strict_validation:
+                from .validation import validate_batch_data
+                integrity["validation"] = {"status": "failed"}
+                integrity["validation"] = validate_batch_data(self.pipeline, request, sources, context)
+                # The strict gate checked every supplied input and its pinned
+                # source support. Historical omissions outside that scope must
+                # not block flat analysis or imply these inputs remain broken.
+                integrity["messages"] = []
+                context = replace(context, metadata={**context.metadata,
+                    "processed_omission_sources": [], "strict_validation": integrity["validation"]})
             applied = LogicRunner(self.registry, cache_limit=0).apply(specs, context)
             payload.update(source_key=applied.source_key, keys=applied.keys, errors=applied.errors,
-                           results={identifier: _text_result(result) for identifier, result in applied.results.items()})
+                           results={identifier: _text_result(result, integrity)
+                                    for identifier, result in applied.results.items()})
             payload["status"] = ("partial" if applied.results else "failed") if applied.errors else "completed"
             if applied.errors:
                 payload["error"] = "; ".join(f"{name}: {message}" for name, message in applied.errors.items())
@@ -223,6 +250,8 @@ class BatchRunner:
                         entry = manifest["tickers"][ticker]
                         entry.update(status=payload["status"], error=payload["error"], summaries=summaries,
                                      summary_errors=summary_errors,
+                                     data_warnings=payload.get("data_integrity", {}).get("messages", []),
+                                     data_validation=payload.get("data_integrity", {}).get("validation", {}),
                                      analysis_status={spec.instance_id: ("failed" if spec.instance_id in payload["errors"]
                                          else "completed" if spec.instance_id in payload["results"] else payload["status"])
                                          for spec in specs},

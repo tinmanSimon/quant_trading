@@ -77,6 +77,40 @@ def test_fully_covered_skips_vendor_and_does_not_create_revisions(setup):
     assert pipeline.list_datasets() == [old]
 
 
+@pytest.mark.parametrize("policy", ["refresh_overlap", "fetch_missing"])
+def test_reusing_screening_data_preserves_exclusion_provenance_and_warns(setup, policy):
+    from data_pipeline import OmittedBar
+
+    pipeline, vendor = setup
+    quality = FetchQuality(status="reported", skip_invalid_bars=True,
+                           omitted_bars=(OmittedBar(day(7), "invalid_bar: open=0"),))
+    frame = bars(2, 16).filter(pl.col("timestamp") != day(7))
+    old = pipeline.store.write_raw(DataRequest("TEST", day(2), day(16), "1d", "test"),
+                                   frame, quality=quality)
+    report = pipeline.fetch_many(["TEST"], provider="test", timeframe="1d",
+                                 start=day(6), end=day(11), overlap_policy=policy)
+    outcome, = report.outcomes
+    assert outcome.status == "skipped" and outcome.dataset_ids == (old.dataset_id,)
+    assert vendor.requests == []
+    assert outcome.quality["skip_invalid_bars"] is True
+    assert outcome.quality["omitted_bars"][0]["timestamp"] == day(7).isoformat()
+    assert "1 excluded bar" in outcome.warning_message
+    assert "does not certify complete data" in outcome.warning_message
+
+
+def test_exclusion_outside_requested_range_does_not_warn_about_selected_data(setup):
+    from data_pipeline import OmittedBar
+
+    pipeline, _ = setup
+    quality = FetchQuality(status="reported", skip_invalid_bars=True,
+                           omitted_bars=(OmittedBar(day(3), "invalid_bar: open=0"),))
+    pipeline.store.write_raw(DataRequest("TEST", day(2), day(16), "1d", "test"),
+                              bars(2, 16).filter(pl.col("timestamp") != day(3)), quality=quality)
+    outcome, = fetch(pipeline, 6, 11).outcomes
+    assert outcome.quality["skip_invalid_bars"] is True
+    assert outcome.warning_message is None
+
+
 @pytest.mark.parametrize("old_ranges, requested, expected, status", [
     ([(6, 16)], (1, 11), (1, 16), "refreshed"),
     ([(1, 8)], (6, 16), (1, 16), "refreshed"),

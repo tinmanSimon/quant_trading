@@ -9,6 +9,7 @@ from data_pipeline.storage.models import StoredDataset
 from .errors import ResearchError
 from .instruments import ExpectedBar
 from .modes import ADJUSTED_PRICE_BASIS, TRANSFORMED_ADJUSTED_PRICE_BASIS, validate_research_mode
+from .timeframes import bar_duration
 
 
 def validate_processed_source(
@@ -49,9 +50,9 @@ def validate_processed_source(
                 raise ResearchError("Processed lineage must point to raw source revisions.")
             # Verify the immutable source checksum, even when the parent is
             # historical. Never replace a selected parent with an active query.
-            pipeline.read_dataset(parent_id)
-            parent_cache[parent_id] = parent
-        parents.append(parent_cache[parent_id])
+            frame = pipeline.read_dataset(parent_id)
+            parent_cache[parent_id] = (parent, frame["timestamp"])
+        parents.append(parent_cache[parent_id][0])
     identities = {(parent.request.dataset, parent.request.provider,
                    parent.request.symbol, parent.contract) for parent in parents}
     if len(identities) != 1:
@@ -100,6 +101,7 @@ def validate_processed_source(
         contract = next_contract
     if contract != item.contract:
         raise ResearchError("Processed output timeframe/contract does not match its processor pipeline.")
+    _validate_parent_coverage(parents, selected_bars, item.contract, parent_cache)
     if research_mode == "adjusted_price":
         if not adjustment_json:
             raise ResearchError(
@@ -109,3 +111,48 @@ def validate_processed_source(
         price_basis = (TRANSFORMED_ADJUSTED_PRICE_BASIS if other_price_transformation
                        else ADJUSTED_PRICE_BASIS)
     return specs, parents, price_basis
+
+
+def _validate_parent_coverage(parents, bars, output_contract, parent_cache):
+    """A complete output grid must not conceal gaps in its actual raw inputs.
+
+    Inspect the immutable parents used to produce this output, not later active
+    revisions or a provider's optional omission report. Only the requested
+    execution/warm-up bars' source intervals matter: regular-hours aggregates
+    do not require pre/post-market bars, nor source history outside this slice.
+    """
+    if not bars:
+        return
+    source_timeframe = parents[0].contract.timeframe
+    duration = bar_duration(source_timeframe)
+    if duration is None and output_contract.timeframe != "1d":
+        raise ResearchError("Cannot verify intraday output coverage from daily raw source bars.")
+    first = bars[0].timestamp if duration is None else bars[0].open
+    last = bars[-1].close
+    actual = set()
+    for parent in parents:
+        timestamps = parent_cache[parent.dataset_id][1]
+        actual.update(timestamps.filter((timestamps >= first) & (timestamps < last)).to_list())
+    missing = set()
+    for bar in bars:
+        if duration is None:
+            if bar.timestamp not in actual:
+                missing.add(bar.timestamp)
+            continue
+        stamp = bar.open
+        while stamp < bar.close:
+            if stamp not in actual:
+                missing.add(stamp)
+            stamp += duration
+    if not missing:
+        return
+    omissions = {bar.timestamp: bar.reason for parent in parents for bar in parent.quality.omitted_bars}
+    preview = "; ".join(
+        stamp.isoformat() + (f" ({omissions[stamp]})" if stamp in omissions else "")
+        for stamp in sorted(missing)[:10]
+    )
+    raise ResearchError(
+        f"Processed data has incomplete raw source coverage: missing {len(missing)} required "
+        f"{source_timeframe} source bars within selected trading/warm-up intervals (UTC): {preview}. "
+        "A complete processed output grid does not establish complete underlying data."
+    )

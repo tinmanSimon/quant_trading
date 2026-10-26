@@ -177,14 +177,15 @@ def test_equity_chart_uses_valuation_time_instead_of_earlier_bar_label(monkeypat
     from contextlib import nullcontext
     from types import SimpleNamespace
     import dashboard.app as app
+    from research.backtesting.models import BacktestResult, ExecutionSettings
 
     opened = datetime(2025, 1, 2, 14, 30, tzinfo=UTC)
     closed = datetime(2025, 1, 2, 15, 30, tzinfo=UTC)
     equity = pl.DataFrame({"timestamp": [opened, opened], "valuation_time": [opened, closed],
                            "equity": [100.0, 110.0]})
     original = equity.clone()
-    result = SimpleNamespace(symbol="AAPL", strategy_spec={"name": "example"}, equity=equity,
-                             trades=pl.DataFrame(), orders=pl.DataFrame(), metrics={})
+    result = BacktestResult(symbol="AAPL", strategy_spec={"name": "example"}, equity=equity,
+                            settings=ExecutionSettings(), trades=pl.DataFrame(), orders=pl.DataFrame(), metrics={})
     run = SimpleNamespace(run_id="example", results=[result], comparison=pl.DataFrame(), manifest={})
     charts = []
     ignore = lambda *args, **kwargs: None

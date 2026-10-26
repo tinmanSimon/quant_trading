@@ -1,6 +1,7 @@
 """Common source selection and date controls."""
 
 from datetime import UTC, date, datetime, time, timedelta
+from calendar import monthrange
 import streamlit as st
 
 def _utc_date(value: date) -> datetime:
@@ -26,16 +27,22 @@ def _provider_choice(names, *, key, result_key=None, memory=None):
 
 
 def _date_fields(prefix: str, *, first: date | None = None, last: date | None = None,
-                 intraday: bool = False, memory=None):
+                 intraday: bool = False, memory=None, history_years: int | None = None):
     left, right = st.columns(2)
     first = first or date.today() - timedelta(days=30)
     last = last or date.today()
+    bounds = {}
+    if history_years is not None:
+        today = date.today()
+        year = max(1, today.year - history_years)
+        earliest = today.replace(year=year, day=min(today.day, monthrange(year, today.month)[1]))
+        bounds["min_value"] = min(earliest, first, last)
     if memory:
-        start = memory.widget(left.date_input, "Start date (UTC, inclusive)", value=first, key=f"{prefix}-start")
-        end = memory.widget(right.date_input, "End date (UTC, exclusive)", value=last, key=f"{prefix}-end")
+        start = memory.widget(left.date_input, "Start date (UTC, inclusive)", value=first, key=f"{prefix}-start", **bounds)
+        end = memory.widget(right.date_input, "End date (UTC, exclusive)", value=last, key=f"{prefix}-end", **bounds)
     else:
-        start = left.date_input("Start date (UTC, inclusive)", first, key=f"{prefix}-start")
-        end = right.date_input("End date (UTC, exclusive)", last, key=f"{prefix}-end")
+        start = left.date_input("Start date (UTC, inclusive)", first, key=f"{prefix}-start", **bounds)
+        end = right.date_input("End date (UTC, exclusive)", last, key=f"{prefix}-end", **bounds)
     if intraday:
         start_time = (memory.widget(left.time_input, "Start time (UTC)", value=time.min, step=60, key=f"{prefix}-start-time") if memory else
                       left.time_input("Start time (UTC)", time.min, step=60, key=f"{prefix}-start-time"))
@@ -43,5 +50,4 @@ def _date_fields(prefix: str, *, first: date | None = None, last: date | None = 
                     right.time_input("End time (UTC)", time.min, step=60, key=f"{prefix}-end-time"))
         return datetime.combine(start, start_time, UTC), datetime.combine(end, end_time, UTC)
     return _utc_date(start), _utc_date(end)
-
 

@@ -56,7 +56,7 @@ def databento_fetch_page(research, adapter):
         st.caption("Native hourly bars keep the vendor's timestamps; they are not shifted to 09:30.")
     ticker_text = st.text_area("Tickers (commas, spaces, or new lines)", "AAPL, MSFT", key="db-tickers")
     tickers = _tickers(ticker_text, "databento")
-    start, end = _date_fields("db-fetch", intraday=True)
+    start, end = _date_fields("db-fetch", intraday=True, history_years=100)
     policy = st.selectbox("Existing data", list(_POLICIES), key="db-overlap-policy")
     st.caption("Fetch missing ranges reuses local coverage. Refresh downloads overlapping ranges again. "
                "Range coverage does not certify that every expected bar exists.")

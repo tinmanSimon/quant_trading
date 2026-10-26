@@ -74,7 +74,7 @@ def test_fetch_reports_all_tickers_and_failure_exit_code(app, capsys, tmp_path):
     factory.assert_called_once_with(str(tmp_path / "data"), str(tmp_path / "runs"))
     service.pipeline.fetch_many.assert_called_once_with(
         tickers=["AAPL", "MSFT", "NVDA"], start=datetime(2025, 1, 1, tzinfo=UTC),
-        end=datetime(2025, 2, 1, tzinfo=UTC), timeframe="1h", skip_missing_ohlc=True,
+        end=datetime(2025, 2, 1, tzinfo=UTC), timeframe="1h", skip_missing_ohlc=True, skip_invalid_bars=False,
     )
     lines = capsys.readouterr().out.splitlines()
     assert lines == ["AAPL: saved 42 rows; aapl-id", "MSFT: FAILED (ProviderError): upstream timed out",

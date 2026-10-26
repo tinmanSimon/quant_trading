@@ -135,6 +135,8 @@ _analysis_page(Research({str(research.pipeline.store.data_dir)!r}, {str(research
 """
     app = AppTest.from_string(script, default_timeout=30).run()
     assert not app.exception and not app.error
+    # This synthetic flat-pattern fixture is intentionally not a full session.
+    app.checkbox(key="batch-strict-validation-databento").uncheck().run()
     app.checkbox(key="batch-all-tickers").check().run()
     app.selectbox(key="batch-analysis-choice").select((FlatLogic.name, FlatLogic.version))
     app.button(key="batch-analysis-add").click().run()

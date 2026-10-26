@@ -9,7 +9,7 @@ from threading import Event, Lock
 import polars as pl
 import pytest
 
-from data_pipeline import DataPipeline, DataRequest
+from data_pipeline import DataPipeline, DataRequest, FetchQuality, OmittedBar
 from research.analysis import BaseChartLogic, LogicContext, LogicRegistry, LogicResult, LogicRunner, LogicSpec, analysis
 from research.analysis.batch import BatchRequest, BatchRunner, BatchStore
 from research.analysis.scripting.decorator import script_class
@@ -283,6 +283,120 @@ def test_processed_analysis_does_not_require_backtest_causality_contract(batch):
     manifest = runner.execute(request(layer="processed", pipeline_id=fingerprint), [specification()])
     assert manifest["counts"]["completed"] == 1
     assert manifest["sources"]["AAPL"][0]["dataset_id"] == processed.dataset_id
+
+
+@pytest.mark.parametrize("missing_index", [0, 4, 9])
+def test_screening_records_omission_warnings_in_saved_results_and_summary(batch, missing_index):
+    pipeline, _, store, runner = batch
+    frame = bars()
+    missing = frame["timestamp"][missing_index]
+    quality = FetchQuality(status="reported", skip_invalid_bars=True,
+                           omitted_bars=(OmittedBar(missing, "invalid_bar: open must be greater than zero"),))
+    pipeline.store.write_raw(DataRequest("AAPL", START, START + timedelta(hours=10), timeframe="1h"),
+                             frame.filter(pl.col("timestamp") != missing), quality=quality)
+    manifest = runner.execute(request(start=START, end=START + timedelta(hours=10)), [specification()])
+    entry = manifest["tickers"]["AAPL"]
+    assert entry["status"] == "completed"
+    assert entry["data_validation"]["status"] == "not_checked"
+    assert any("incomplete history" in message for message in entry["data_warnings"])
+    saved = store.load_ticker(manifest["run_id"], "AAPL")
+    result = saved["results"]["counts"]
+    assert result["data"]["data_integrity"]["unresolved_omitted_bar_timestamps"] == [missing.isoformat()]
+    assert entry["data_warnings"][0] in result["messages"]
+    assert saved["data_integrity"] == result["data"]["data_integrity"]
+
+
+def test_repaired_omission_does_not_warn_in_screening_results(batch):
+    pipeline, _, store, runner = batch
+    frame = bars()
+    quality = FetchQuality(status="reported", skip_invalid_bars=True,
+                           omitted_bars=(OmittedBar(frame["timestamp"][4], "historical omission, repaired"),))
+    pipeline.store.write_raw(DataRequest("AAPL", START, START + timedelta(hours=10), timeframe="1h"),
+                             frame, quality=quality)
+    manifest = runner.execute(request(), [specification()])
+    assert manifest["tickers"]["AAPL"]["data_warnings"] == []
+    saved = store.load_ticker(manifest["run_id"], "AAPL")
+    assert saved["data_integrity"]["unresolved_omitted_bar_count"] == 0
+
+
+def test_generic_processed_screening_keeps_raw_parent_warning(batch):
+    pipeline, _, store, runner = batch
+    frame = bars()
+    missing = frame["timestamp"][4]
+    quality = FetchQuality(status="reported", skip_invalid_bars=True,
+                           omitted_bars=(OmittedBar(missing, "invalid_bar: open is missing (null)"),))
+    parent = pipeline.store.write_raw(DataRequest("AAPL", START, START + timedelta(hours=10), timeframe="1h"),
+                                      frame.filter(pl.col("timestamp") != missing), quality=quality)
+    processors_json = json.dumps([{"name": "example", "version": "1", "config": {}}],
+                                 sort_keys=True, separators=(",", ":"))
+    fingerprint = sha256(processors_json.encode()).hexdigest()
+    pipeline.store.write_processed(parent.dataset_id, frame, pipeline_id=fingerprint,
+                                    processors_json=processors_json)
+    manifest = runner.execute(request(layer="processed", pipeline_id=fingerprint), [specification()])
+    assert manifest["counts"]["completed"] == 1
+    entry = manifest["tickers"]["AAPL"]
+    assert "unresolved omitted raw-input" in entry["data_warnings"][0]
+    result = store.load_ticker(manifest["run_id"], "AAPL")["results"]["counts"]
+    assert result["data"]["data_integrity"]["processed_omission_sources"]
+
+
+def test_screening_warns_about_missing_initialization_bars(batch):
+    pipeline, _, store, runner = batch
+    frame = bars()
+    missing = frame["timestamp"][2]
+    quality = FetchQuality(status="reported", skip_invalid_bars=True,
+                           omitted_bars=(OmittedBar(missing, "invalid_bar: open is missing (null)"),))
+    pipeline.store.write_raw(DataRequest("AAPL", START, START + timedelta(hours=10), timeframe="1h"),
+                             frame.filter(pl.col("timestamp") != missing), quality=quality)
+    manifest = runner.execute(request(start=START + timedelta(hours=5)), [specification()])
+    assert "initialization history" in manifest["tickers"]["AAPL"]["data_warnings"][0]
+    integrity = store.load_ticker(manifest["run_id"], "AAPL")["data_integrity"]
+    assert integrity["unresolved_omitted_bar_count"] == 0
+    assert integrity["initialization_omissions"]["unresolved_omitted_bar_count"] == 1
+
+
+@pytest.mark.parametrize("provider,strict,expected", [
+    ("yahoo", None, "completed"), ("yahoo", True, "failed"),
+    ("databento-xnas.itch", None, "failed"), ("databento-xnas.itch", False, "completed"),
+])
+def test_optional_strict_gate_blocks_missing_daily_bar_before_analysis(batch, provider, strict, expected):
+    pipeline, _, store, runner = batch
+    end = START + timedelta(days=3)
+    frame = bars(size=3).with_columns(pl.Series("timestamp", [START + timedelta(days=i) for i in range(3)],
+                                               dtype=pl.Datetime("ms", "UTC")))
+    pipeline.store.write_raw(DataRequest("AAPL", START, end, timeframe="1d", provider=provider),
+                             frame.filter(pl.col("timestamp") != START + timedelta(days=1)))
+    manifest = runner.execute(BatchRequest(("AAPL",), provider=provider, timeframe="1d", start=START,
+                                          end=end, strict_validation=strict), [specification()])
+    detail = store.load_ticker(manifest["run_id"], "AAPL")
+    assert detail["status"] == expected
+    if expected == "failed":
+        assert "Missing 1 required" in detail["error"]
+        assert detail["results"] == {}
+        assert manifest["tickers"]["AAPL"]["data_validation"]["status"] == "failed"
+    else:
+        assert detail["results"]["counts"]["tables"][0]["rows"][0]["count"] == 2
+
+
+@pytest.mark.parametrize("initial_gap", [False, True])
+def test_strict_gate_validates_frozen_revision_even_after_replacement(batch, initial_gap):
+    pipeline, _, store, runner = batch
+    end = START + timedelta(days=3)
+    frame = bars(size=3).with_columns(pl.Series("timestamp", [START + timedelta(days=i) for i in range(3)],
+                                               dtype=pl.Datetime("ms", "UTC")))
+    incomplete = frame.filter(pl.col("timestamp") != START + timedelta(days=1))
+    original = pipeline.store.write_raw(DataRequest("AAPL", START, end, timeframe="1d"),
+                                        incomplete if initial_gap else frame)
+    prepared = runner.create(BatchRequest(("AAPL",), start=START, end=end, strict_validation=True),
+                             [specification()])
+    pipeline.store.replace_raw(original.dataset_id, frame if initial_gap else incomplete,
+                               confirm=original.dataset_id)
+    manifest = runner.run(prepared["run_id"])
+    detail = store.load_ticker(manifest["run_id"], "AAPL")
+    assert detail["status"] == ("failed" if initial_gap else "completed")
+    if not initial_gap:
+        assert detail["data_integrity"]["validation"]["source_dataset_ids"] == [original.dataset_id]
+        assert manifest["tickers"]["AAPL"]["data_validation"]["status"] == "passed"
 
 
 @pytest.mark.parametrize("settings", [

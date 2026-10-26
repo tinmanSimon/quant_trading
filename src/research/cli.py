@@ -54,6 +54,8 @@ def main(argv=None):
         sub.add_argument("--timeframe", type=_timeframe, choices=choices, default="1d")
         if name == "fetch":
             sub.add_argument("--skip-missing-ohlc", action="store_true")
+            sub.add_argument("--skip-invalid-bars", action="store_true",
+                             help="Exclude invalid Yahoo bars and record their original values and reasons.")
         else:
             sub.add_argument("--strategies", type=Path, required=True,
                              help="JSON file containing a list of versioned strategy specifications.")
@@ -87,7 +89,8 @@ def main(argv=None):
             return 0
         query = dict(tickers=args.tickers, start=args.start, end=args.end, timeframe=args.timeframe)
         if args.command == "fetch":
-            report = app.pipeline.fetch_many(**query, skip_missing_ohlc=args.skip_missing_ohlc)
+            report = app.pipeline.fetch_many(**query, skip_missing_ohlc=args.skip_missing_ohlc,
+                                             skip_invalid_bars=args.skip_invalid_bars)
             for outcome in report.outcomes:
                 if outcome.status == "failed":
                     print(f"{outcome.ticker}: FAILED ({outcome.error_type}): {outcome.error_message}")

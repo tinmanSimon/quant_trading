@@ -63,7 +63,115 @@ def _finish(app):
     jobs[0].thread.join(timeout=10)
     assert not jobs[0].running and jobs[0].error is None
     app.run()
-    assert not app.exception and not app.error
+    assert not app.exception and not app.error, [item.value for item in app.error]
+
+
+def _add_complete_session(research, provider):
+    start = datetime(2024, 1, 2, 14, 30, tzinfo=UTC)
+    stamps = [start + timedelta(minutes=index) for index in range(390)]
+    frame = pl.DataFrame({"timestamp": stamps, "symbol": ["FULL"] * 390,
+                          "open": [10.] * 390, "high": [11.] * 390,
+                          "low": [9.] * 390, "close": [10.] * 390, "volume": [100.] * 390})
+    research.pipeline.ingest_frame(DataRequest("FULL", start, start + timedelta(minutes=390),
+                                               provider=provider, timeframe="1m"), frame)
+
+
+def test_strict_validation_defaults_and_overrides_persist_per_provider(batch_page):
+    app, _, script, research = batch_page
+    assert app.checkbox(key="batch-strict-validation-yahoo").value is False
+    _add_complete_session(research, "databento-xnas.itch")
+    app.run()
+    app.selectbox(key="batch-provider").set_value("databento-xnas.itch").run()
+    assert app.checkbox(key="batch-strict-validation-databento-xnas.itch").value is True
+    assert app.text_input(key="batch-validation-calendar-databento-xnas.itch").value == "XNYS"
+    app.checkbox(key="batch-strict-validation-databento-xnas.itch").uncheck().run()
+    app.text_input(key="batch-session-timezone-databento-xnas.itch").set_value("UTC").run()
+    app.selectbox(key="batch-provider").set_value("yahoo").run()
+    assert app.checkbox(key="batch-strict-validation-yahoo").value is False
+    app.checkbox(key="batch-strict-validation-yahoo").check().run()
+    app.text_input(key="batch-validation-calendar-yahoo").set_value("XNAS").run()
+    reopened = AppTest.from_string(script, default_timeout=30).run()
+    assert not reopened.exception and not reopened.error
+    assert reopened.checkbox(key="batch-strict-validation-yahoo").value is True
+    assert reopened.text_input(key="batch-validation-calendar-yahoo").value == "XNAS"
+    assert reopened.text_input(key="batch-session-timezone-yahoo").value == "America/New_York"
+    reopened.selectbox(key="batch-provider").set_value("databento-xnas.itch").run()
+    assert reopened.checkbox(key="batch-strict-validation-databento-xnas.itch").value is False
+    assert reopened.text_input(key="batch-session-timezone-databento-xnas.itch").value == "UTC"
+
+
+@pytest.mark.parametrize("provider,strict_validation", [
+    ("yahoo", True), ("databento-xnas.itch", False), ("databento-xnas.itch", True),
+])
+def test_analysis_validation_policy_survives_run_save_and_reopen(
+    batch_page, provider, strict_validation,
+):
+    app, calls, script, research = batch_page
+    _add_complete_session(research, provider)
+    app.run()
+    app.selectbox(key="batch-provider").set_value(provider).run()
+    app.multiselect(key="batch-tickers").set_value(["FULL"]).run()
+    app.checkbox(key=f"batch-strict-validation-{provider}").set_value(strict_validation).run()
+    app.button(key="batch-analysis-add").click().run()
+    app.button(key="batch-run").click().run()
+    _finish(app)
+    app.button(key="batch-save").click().run()
+    manifest = BatchStore(research.runs_dir / "analysis").list_runs()[0]
+    assert manifest["request"]["strict_validation"] is strict_validation
+    assert manifest["request"]["calendar"] == "XNYS"
+    assert manifest["request"]["session_timezone"] == "America/New_York"
+    assert manifest["counts"]["completed"] == 1
+    assert calls == [("FULL", 1)]
+    reopened = AppTest.from_string(script, default_timeout=30).run()
+    assert not reopened.exception and not reopened.error
+    assert reopened.checkbox(key=f"batch-strict-validation-{provider}").value is strict_validation
+    assert reopened.selectbox(key="batch-saved-run").value == manifest["run_id"]
+    assert any("Saved report for FULL" in item.value for item in reopened.markdown)
+    assert calls == [("FULL", 1)]
+
+
+def test_screening_omission_warning_survives_save_and_reopen(batch_page):
+    from data_pipeline import FetchQuality, OmittedBar
+
+    app, calls, script, research = batch_page
+    source = next(item for item in research.pipeline.list_datasets() if item.request.symbol == "AAA")
+    frame = research.pipeline.read_dataset(source.dataset_id)
+    omitted = frame["timestamp"][2]
+    research.pipeline.store.replace_raw(
+        source.dataset_id, frame.filter(pl.col("timestamp") != omitted), confirm=source.dataset_id,
+        quality=FetchQuality(status="reported", skip_missing_ohlc=False, skip_invalid_bars=True,
+                             omitted_bars=(OmittedBar(omitted, "invalid_bar: open exceeds high"),)),
+    )
+    app.run()
+    assert app.checkbox(key="batch-strict-validation-yahoo").value is False
+    app.multiselect(key="batch-tickers").set_value(["AAA"]).run()
+    app.button(key="batch-analysis-add").click().run()
+    app.button(key="batch-run").click().run()
+    _finish(app)
+    warnings = [item.value for item in app.warning if "recorded omitted bars" in item.value]
+    assert len(warnings) == 1
+    assert omitted.isoformat() in warnings[0]
+    assert "Screening results use incomplete history" in warnings[0]
+    ranking = next(item.value for item in app.dataframe if "ticker" in item.value.columns)
+    assert ranking.set_index("ticker").loc["AAA", "data_validation"] == "not_checked"
+    assert ranking.set_index("ticker").loc["AAA", "data_warnings"] == 1
+    app.button(key="batch-save").click().run()
+    store = BatchStore(research.runs_dir / "analysis")
+    manifest = store.list_runs()[0]
+    assert manifest["tickers"]["AAA"]["status"] == "completed"
+    assert manifest["tickers"]["AAA"]["data_validation"] == {"status": "not_checked"}
+    assert manifest["tickers"]["AAA"]["data_warnings"] == warnings
+    detail = store.load_ticker(manifest["run_id"], "AAA")
+    integrity = detail["results"][manifest["specs"][0]["instance_id"]]["data"]["data_integrity"]
+    assert integrity["unresolved_omitted_bar_timestamps"] == [omitted.isoformat()]
+    reopened = AppTest.from_string(script, default_timeout=30).run()
+    assert not reopened.exception and not reopened.error
+    assert [item.value for item in reopened.warning if "recorded omitted bars" in item.value] == warnings
+    ranking = next(item.value for item in reopened.dataframe if "ticker" in item.value.columns)
+    assert ranking.set_index("ticker").loc["AAA", "data_validation"] == "not_checked"
+    assert ranking.set_index("ticker").loc["AAA", "data_warnings"] == 1
+    assert reopened.selectbox(key="batch-saved-run").value == manifest["run_id"]
+    assert calls == [("AAA", 1)]
 
 
 def test_batch_page_runs_ranks_customizes_and_reopens_without_execution(batch_page):

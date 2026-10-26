@@ -361,6 +361,18 @@ settings and outputs.
 See [Flat analysis](docs/flat_analysis.md) for formulas, selection semantics,
 Python APIs, and scaling limits.
 
+### Flat-period bar statistics
+
+On **Analysis**, add **Flat-period bar statistics** to count red bars whose high
+is above or at/below a configurable percentage of open, and all flat-period bars
+whose high is above that threshold. Enter **102** for `high > open × 1.02`.
+The analysis reuses the flat detector's settings and disjoint periods, counts
+each bar once, and reports close-to-close return volatility within those periods.
+Results include both the full selected range and the last calendar month ending
+at the latest completed source bar, with recent window dates shown explicitly.
+Ticker summaries and period details support the existing save/reopen workflow.
+See [Flat-period bar statistics](docs/flat_bar_statistics.md) for the definitions.
+
 ### Private research analyses
 
 Reusable analysis infrastructure, indicators, and trend analysis now live under
@@ -390,6 +402,21 @@ by default. Click **Save analysis** after a run finishes to keep it
 under `<runs directory>/analysis/`. Reopen it through **Saved analysis run**,
 or use **Delete analysis** to remove the selected saved run. Market data continues
 to save only its latest workspace snapshot. Concurrency is bounded, and stopping a batch preserves completed results.
+
+**Strict data validation** defaults off for Yahoo screening and on for Databento.
+You can override either default; choices are remembered separately per provider
+and saved with each run. Both modes check stored-file checksums and OHLCV values.
+Strict mode additionally rejects missing, off-grid, or unfinished bars against
+the selected regular-session calendar (default `XNYS`), including all supplied
+indicator initialization history and the exact raw inputs of processed bars.
+Extended-hours bars do not match that regular-session grid; use an appropriate
+regular-hours processing recipe or turn strict validation off for screening.
+Failures stop the affected ticker before its analyses run, with timestamp details.
+Results show validation status and any recorded screening omissions. Older saved
+runs remain identified as unchecked; opening them does not retroactively validate them.
+
+These checks establish structural and scheduled coverage consistency. They do
+not prove that a vendor's otherwise valid prices or volumes match actual trades.
 
 See [Writing research analyses](docs/analysis_scripts.md) for the toolkit,
 result builders, history/alignment rules, and running the same scripts from
@@ -899,6 +926,15 @@ and cannot prove the provider supplied every real trade or correct prices.
 Replacements receive fresh reports; processing/compaction preserve lineage and
 combined reports. Old recorded omissions do not override a bar now present.
 
+Processed preflight checks the exact immutable raw parents as well as the
+derived output grid. A daily or intraday aggregate cannot conceal missing
+source minutes, even when processing used `aggregate_available`. Time-window
+filters must also retain every input needed by the selected execution/warm-up
+intervals. These checks apply in both strict and adjusted-price research modes;
+refetching a source does not repair a processed revision built from older data.
+Custom processors remain responsible for validating their own dependency
+windows and calendar mappings through their declared validation hooks.
+
 Allocation strategies give each strategy/ticker pair its own cash account.
 Stop/target strategies support the capital allocation modes described below.
 Allocation strategies remain long-only; stop/target strategies can opt into
@@ -1352,6 +1388,48 @@ Supported intervals: `1m`, `2m`, `5m`, `15m`, `60m` (canonical `1h`), `90m`,
 yfinance internally resamples that interval. It does not retry smaller windows
 or switch vendors silently. Use recent dates when requesting intraday data.
 
+Fetch reports preserve the underlying download exception type and message,
+including up to three chained causes and HTTP status when supplied by the
+exception, alongside the ticker, interval, requested dates, and configured
+request timeout. `ProviderError` remains the report category; its message
+distinguishes causes such as `YFRateLimitError` and timeouts.
+
+OHLCV value errors report the total number of invalid rows, counts for each
+violated rule, and the first ten affected bars with their ticker, UTC timestamp,
+OHLCV values, and specific reasons (for example, `close exceeds high` or
+`open must be greater than zero`). Missing/non-finite values, negative volume,
+and invalid price relationships are checked together. Duplicate-bar errors
+identify duplicate keys and occurrence counts. When details are limited, the
+remaining count is shown. These diagnostics appear in the dashboard and batch
+report's `error_message`; rerun previously failed fetches to obtain them.
+Strict validation remains the default and never modifies prices.
+
+On the **Fetch** page, enable Yahoo's **Exclude invalid bars** to save the valid
+history while recording every excluded bar's timestamp, original OHLCV values,
+and violated rules. The fetch results include an **Excluded invalid bars** table;
+the same records persist in dataset quality metadata. The option covers missing
+or non-finite numeric values, nonpositive prices, inconsistent OHLC bounds, and
+negative or fractional source volume. It also covers wholly missing bars, so
+the narrower missing-OHLC checkbox is not required. Duplicate timestamps,
+malformed responses, and download errors still fail; an entirely invalid
+response creates no dataset.
+Structural and lossless-conversion checks run before exclusion, so removing an
+invalid row cannot hide duplicate keys or invalid timestamp precision.
+
+The equivalent API option is `pipeline.fetch_many(..., skip_invalid_bars=True)`
+or `YFinanceProvider(skip_invalid_bars=True)`. Batch CLI users can pass
+`quant-research fetch ... --skip-invalid-bars`. The option is off by default and
+does not change the pipeline's acceptance rules for the remaining saved bars.
+Built-in Flat analysis and Flat-period bar statistics receive recorded omission
+timestamps from selected dataset metadata and detect separate periods on either
+side of a known gap. Their returns never bridge that gap. If an omitted timestamp
+has since been restored in the selected data, it no longer separates periods.
+Processed output labels cannot establish that raw inputs were restored. Flat
+screening rejects unresolved processed-input omissions when their effect cannot
+be mapped safely; strict Analysis validation can establish completeness within
+the checked range. Fetch outcomes retain omission reports even when reusing
+already-covered local data, and screening results persist data-quality warnings.
+
 Price policy is explicitly `unadjusted`: yfinance auto-adjust, back-adjust and
 repair are disabled. This preserves Yahoo's supplied OHLC, but does not undo
 historical split treatment already present in Yahoo data. `Adj Close` is not
@@ -1360,7 +1438,9 @@ Source volume is checked on Yahoo's chart response before yfinance processes
 it: missing volume is rejected with UTC timestamps instead of being silently
 filled with zero. Genuine zero volume remains valid. With
 `YFinanceProvider(skip_missing_ohlc=True)`, wholly missing OHLC bars can still
-be skipped with a warning, but missing volume alone is never skipped or filled.
+be skipped with a warning; that narrower option does not skip missing volume
+alone. The broader `skip_invalid_bars` option can exclude such a bar, with its
+missing volume recorded, but neither option fills volume.
 This guard uses per-request history hooks in the pinned yfinance version;
 raw-response regression tests must pass when upgrading that dependency.
 Yahoo symbols are canonicalized to uppercase, so `aapl` and `AAPL` share one

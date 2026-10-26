@@ -12,6 +12,7 @@ from dashboard.components.analysis_selection import select_analyses
 from dashboard.components.source_controls import _date_fields, _provider_choice, _tickers
 from dashboard.pages.processing import pipeline_label
 from research.analysis.batch import BatchRequest, BatchRunner, BatchStore
+from research.analysis.batch.models import default_strict_validation
 from research.analysis.scripting.discovery import load_registry
 
 
@@ -47,11 +48,28 @@ def _source_selection(research, memory):
     workers = memory.widget(st.number_input, "Concurrent tickers", min_value=1, max_value=8,
                             value=1, step=1, key="batch-workers",
                             help="Each worker loads one ticker. Start with one; more workers use more memory.")
+    strict_validation = memory.widget(
+        st.checkbox, "Strict data validation", key=f"batch-strict-validation-{provider}",
+        value=default_strict_validation(provider),
+        help="Check missing and off-grid bars against regular trading sessions, including the raw inputs "
+             "behind processed data. Defaults on for Databento and off for Yahoo; either can be changed.",
+    )
+    st.caption("OHLCV values and stored-file checksums are checked in both modes. Strict validation also "
+               "checks regular-session coverage and the raw inputs behind processed data.")
+    left, right = st.columns(2)
+    calendar = memory.widget(left.text_input, "Trading calendar", value="XNYS",
+                             key=f"batch-validation-calendar-{provider}", disabled=not strict_validation,
+                             help="Exchange calendar for strict validation. XNYS uses New York Stock Exchange "
+                                  "regular sessions, including holidays and early closes.")
+    session_timezone = memory.widget(right.text_input, "Session timezone", value="America/New_York",
+                                     key=f"batch-session-timezone-{provider}",
+                                     help="Timezone used for session boundaries and analysis bar completion.")
     if start >= end:
         st.error("The end must be later than the start.")
         return None
     return dict(tickers=tickers, layer=layer, provider=provider, timeframe=timeframe,
-                pipeline_id=pipeline_id, start=start, end=end, workers=workers)
+                pipeline_id=pipeline_id, start=start, end=end, workers=workers,
+                strict_validation=strict_validation, calendar=calendar, session_timezone=session_timezone)
 
 
 def _saved_results(store, memory, job):

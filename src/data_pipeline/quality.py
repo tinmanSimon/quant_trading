@@ -31,12 +31,15 @@ class FetchQuality:
     skip_missing_ohlc: bool | None = None
     omitted_bars: tuple[OmittedBar, ...] = ()
     provider_version: str | None = None
+    skip_invalid_bars: bool | None = None
 
     def __post_init__(self):
         if self.status not in ("unknown", "reported"):
             raise ValueError("Fetch quality status must be unknown or reported.")
         if self.skip_missing_ohlc is not None and not isinstance(self.skip_missing_ohlc, bool):
             raise ValueError("skip_missing_ohlc must be a boolean or None.")
+        if self.skip_invalid_bars is not None and not isinstance(self.skip_invalid_bars, bool):
+            raise ValueError("skip_invalid_bars must be a boolean or None.")
         if self.provider_version is not None and not isinstance(self.provider_version, str):
             raise ValueError("provider_version must be a string or None.")
         omissions = tuple(self.omitted_bars)
@@ -71,18 +74,20 @@ class FetchResult:
 def merge_quality(reports: list[FetchQuality]) -> FetchQuality:
     """Retain known source omissions; original policies remain in parent metadata.
 
-    A merged report is unknown if any source is unknown. Its skip flag is true
-    if any source enabled skipping, false if all disabled it, otherwise unknown.
+    A merged report is unknown if any source is unknown. Each skip flag is true
+    if any source enabled it, false if all disabled it, otherwise unknown.
     Present rows can repair recorded historical omissions, so coverage checks
     must compare omissions against the actual selected input timestamps.
     """
     if not reports:
         return FetchQuality()
     policies = {report.skip_missing_ohlc for report in reports}
+    invalid_policies = {report.skip_invalid_bars for report in reports}
     versions = {report.provider_version for report in reports}
     return FetchQuality(
         status="reported" if all(report.status == "reported" for report in reports) else "unknown",
         skip_missing_ohlc=True if True in policies else False if policies == {False} else None,
         omitted_bars=tuple(bar for report in reports for bar in report.omitted_bars),
         provider_version=next(iter(versions)) if len(versions) == 1 else None,
+        skip_invalid_bars=True if True in invalid_policies else False if invalid_policies == {False} else None,
     )

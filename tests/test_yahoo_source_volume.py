@@ -76,6 +76,119 @@ def test_genuine_zero_volume_and_prices_survive_ingest(source, tmp_path):
     cached.assert_called_once()
 
 
+def test_fractional_source_volume_error_identifies_bar_and_value(source):
+    payload, request, _, _ = source
+    payload["chart"]["result"][0]["indicators"]["quote"][0]["volume"][1] = 12.5
+    with pytest.raises(SchemaValidationError) as error:
+        YFinanceProvider().fetch(request)
+    message = str(error.value)
+    assert "AAPL at 2024-01-02T15:30:00+00:00" in message
+    assert "volume=12.5" in message
+    assert "must be integral" in message
+
+
+@pytest.mark.parametrize("field,value,reason", [
+    ("open", 0., "open must be greater than zero"),
+    ("open", 105., "open exceeds high"),
+    ("close", None, "close is missing"),
+    ("close", float("inf"), "close is not finite"),
+    ("volume", None, "volume is missing"),
+    ("volume", -1., "volume must be greater than or equal to zero"),
+    ("volume", 1.5, "volume must be integral"),
+])
+def test_opt_in_excludes_invalid_source_bar_and_persists_original_values(
+        source, tmp_path, field, value, reason):
+    payload, request, _, _ = source
+    payload["chart"]["result"][0]["indicators"]["quote"][0][field][1] = value
+    before = deepcopy(payload)
+    pipeline = DataPipeline(tmp_path / "data", providers=ProviderRegistry({
+        "yahoo": YFinanceProvider(skip_invalid_bars=True),
+    }))
+    with pytest.warns(UserWarning, match="skipped 1 invalid bars"):
+        saved = pipeline.ingest(request)
+    reopened = DataPipeline(tmp_path / "data")
+    frame = reopened.read_dataset(saved.raw.dataset_id)
+    assert frame["close"].to_list() == [101., 103.]
+    quality = reopened.get_metadata(saved.raw.dataset_id).quality
+    assert quality.skip_invalid_bars is True
+    omitted, = quality.omitted_bars
+    assert omitted.timestamp == request.start + timedelta(hours=1)
+    assert reason in omitted.reason
+    assert f"{field}={value!r}" in omitted.reason
+    assert "original values" in omitted.reason
+    assert before == payload
+    with pytest.raises((InvalidOHLCVError, SchemaValidationError)):
+        YFinanceProvider().fetch(request)
+
+
+def test_excluding_all_invalid_bars_saves_no_dataset(source, tmp_path):
+    payload, request, _, _ = source
+    payload["chart"]["result"][0]["indicators"]["quote"][0]["open"] = [0., 0., 0.]
+    pipeline = DataPipeline(tmp_path / "data", providers=ProviderRegistry({
+        "yahoo": YFinanceProvider(skip_invalid_bars=True),
+    }))
+    with pytest.warns(UserWarning), pytest.raises(EmptyDataError):
+        pipeline.ingest(request)
+    assert pipeline.list_datasets() == []
+
+
+def test_exclusion_does_not_suppress_duplicate_or_malformed_source(source):
+    from data_pipeline.exceptions import DuplicateBarError
+    payload, request, _, _ = source
+    result = payload["chart"]["result"][0]
+    result["timestamp"][1] = result["timestamp"][0]
+    result["indicators"]["quote"][0]["open"] = [0., 0., 0.]
+    with pytest.raises(DuplicateBarError):
+        YFinanceProvider(skip_invalid_bars=True).fetch(request)
+    result["timestamp"][1] += 3600
+    result["indicators"]["quote"][0]["high"].pop()
+    with pytest.raises(SchemaValidationError, match="array lengths"):
+        YFinanceProvider(skip_invalid_bars=True).fetch(request)
+
+
+def test_exclusion_cannot_hide_lossy_source_numbers_on_invalid_bar(source):
+    payload, request, _, _ = source
+    quotes = payload["chart"]["result"][0]["indicators"]["quote"][0]
+    quotes["open"][1] = 0.
+    quotes["volume"][1] = 2 ** 53 + 1
+    with pytest.raises(SchemaValidationError, match="losslessly"):
+        YFinanceProvider(skip_invalid_bars=True).fetch(request)
+
+
+def test_exclusion_ignores_malformed_latest_quote_outside_request(source):
+    payload, request, _, _ = source
+    raw = payload["chart"]["result"][0]
+    raw["timestamp"][-1] = int(request.end.timestamp())
+    raw["indicators"]["quote"][0]["volume"][-1] = "unavailable"
+    result = YFinanceProvider(skip_invalid_bars=True).fetch_result(request)
+    assert result.frame["volume"].to_list() == [1000., 2000.]
+    assert result.quality.omitted_bars == ()
+
+
+def test_daily_exclusions_use_exchange_session_date_labels(source):
+    payload, _, _, _ = source
+    result = payload["chart"]["result"][0]
+    start = datetime(2024, 1, 2, 14, 30, tzinfo=UTC)
+    result["timestamp"] = [int((start + timedelta(days=i)).timestamp()) for i in range(3)]
+    result["indicators"]["quote"][0]["open"][1] = 0.
+    request = DataRequest("AAPL", start.replace(hour=0, minute=0),
+                          start.replace(hour=0, minute=0) + timedelta(days=3), timeframe="1d")
+    with pytest.warns(UserWarning, match="skipped 1 invalid bars"):
+        fetched = YFinanceProvider(skip_invalid_bars=True).fetch_result(request)
+    assert fetched.frame.height == 2
+    omitted, = fetched.quality.omitted_bars
+    assert omitted.timestamp == datetime(2024, 1, 3, tzinfo=UTC)
+
+
+def test_exclusion_keeps_valid_zero_volume_bars(source):
+    payload, request, _, _ = source
+    payload["chart"]["result"][0]["indicators"]["quote"][0]["volume"][1] = 0
+    result = YFinanceProvider(skip_invalid_bars=True).fetch_result(request)
+    assert result.frame.height == 3
+    assert result.frame["volume"].to_list() == [1000., 0., 3000.]
+    assert result.quality.omitted_bars == ()
+
+
 def test_wholly_missing_bar_is_skipped_before_yfinance_volume_fill(source, tmp_path):
     payload, request, _, _ = source
     quotes = payload["chart"]["result"][0]["indicators"]["quote"][0]

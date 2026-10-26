@@ -4,9 +4,23 @@ from research.analysis import AppliedRun, LogicSpec
 from research.analysis.core.runner import source_key
 
 
+def upgrade_flat_bar_statistics_settings(specs, registry):
+    """Preserve selected settings when extending the statistics summaries."""
+    name, version = "flat_bar_statistics", "1.3.0-engine.2.2.0"
+    if not any(item.name == name and item.version == version for item in registry.definitions()):
+        return False
+    changed = False
+    for spec in specs:
+        if (isinstance(spec, dict) and spec.get("name") == name
+                and spec.get("version") in {"1.0.0-engine.2.2.0", "1.1.0-engine.2.2.0", "1.2.0-engine.2.2.0"}):
+            spec["version"] = version
+            changed = True
+    return changed
+
+
 def upgrade_flat_settings(specs, registry, *, saved_defaults=None):
     """Stage known flat settings and defaults; never rewrite applied results."""
-    version = "1.0.0-engine.2.2.0"
+    version = "1.1.0-engine.2.2.0"
     if not any(item.name == "flat" and item.version == version for item in registry.definitions()):
         return False
     defaults = registry.defaults("flat", version)
@@ -19,7 +33,7 @@ def upgrade_flat_settings(specs, registry, *, saved_defaults=None):
         if (not isinstance(spec, dict) or spec.get("name") != "flat"
                 or spec.get("version") not in {
                     "1.0.0-engine.1.0.0", "1.0.0-engine.1.1.0", "1.0.0-engine.2.0.0",
-                    "1.0.0-engine.2.1.0"}
+                    "1.0.0-engine.2.1.0", "1.0.0-engine.2.2.0"}
                 or not isinstance(spec.get("config"), dict)):
             continue
         config = spec["config"]
@@ -45,6 +59,10 @@ def upgrade_flat_settings(specs, registry, *, saved_defaults=None):
 
 def flat_settings_upgrade_message(specs, *, action, saved_defaults=None):
     """Describe the versions being staged before upgrade_flat_settings mutates them."""
+    if any(isinstance(spec, dict) and spec.get("name") == "flat"
+           and spec.get("version") == "1.0.0-engine.2.2.0" for spec in specs):
+        return ("Flat analysis now separates periods at recorded missing bars. "
+                f"Click {action} to recalculate. Settings and saved results are preserved.")
     legacy_slope = any(isinstance(spec, dict) and spec.get("name") == "flat"
                        and spec.get("version") in {"1.0.0-engine.1.0.0", "1.0.0-engine.1.1.0"}
                        for spec in specs)

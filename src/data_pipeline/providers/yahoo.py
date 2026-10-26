@@ -44,7 +44,7 @@ from ..exceptions import (
     UnsupportedRequestError,
 )
 from ..models import DataRequest
-from ..schemas.ohlcv import validate_ohlcv
+from ..schemas.ohlcv import validate_ohlcv, validate_ohlcv_structure, bar_value_flags
 from ..quality import FetchQuality, FetchResult, OmittedBar
 from .base import BaseDataProvider
 
@@ -65,7 +65,9 @@ class YFinanceProvider(BaseDataProvider):
     using its own finite timeouts. Downloads run without worker threads and
     this adapter adds no retries. Opt-in ``skip_missing_ohlc`` drops bars whose
     four OHLC prices are all missing, warning with every omitted timestamp.
-    Other invalid values still fail validation.
+    Other invalid values still fail validation unless ``skip_invalid_bars`` is
+    enabled. That broader policy records every excluded bar's original values
+    and violations; malformed structures and duplicate timestamps still fail.
     """
 
     name = "yahoo"
@@ -75,7 +77,8 @@ class YFinanceProvider(BaseDataProvider):
     supported_datasets = frozenset({"ohlcv"})
     supported_price_adjustments = frozenset({"unadjusted"})
 
-    def __init__(self, *, timeout: float = 10.0, skip_missing_ohlc: bool = False) -> None:
+    def __init__(self, *, timeout: float = 10.0, skip_missing_ohlc: bool = False,
+                 skip_invalid_bars: bool = False) -> None:
         if (
             isinstance(timeout, bool)
             or not isinstance(timeout, Real)
@@ -87,6 +90,9 @@ class YFinanceProvider(BaseDataProvider):
         if not isinstance(skip_missing_ohlc, bool):
             raise ValueError("skip_missing_ohlc must be a boolean.")
         self.skip_missing_ohlc = skip_missing_ohlc
+        if not isinstance(skip_invalid_bars, bool):
+            raise ValueError("skip_invalid_bars must be a boolean.")
+        self.skip_invalid_bars = skip_invalid_bars
 
     def fetch(self, request: DataRequest) -> pl.DataFrame:
         return self.fetch_result(request).frame
@@ -107,15 +113,21 @@ class YFinanceProvider(BaseDataProvider):
                 skip_missing_ohlc=self.skip_missing_ohlc,
                 omissions=omissions,
                 date_labels=date_labels,
+                skip_invalid_bars=self.skip_invalid_bars,
             )
         except (InvalidOHLCVError, SchemaValidationError, EmptyDataError, DuplicateBarError):
             raise
         except YFPricesMissingError as exc:
-            raise EmptyDataError(f"Yahoo returned no data for {request.symbol!r}: {exc}") from exc
+            raise EmptyDataError(
+                f"Yahoo returned no data for {request.symbol!r} at interval {request.timeframe!r} "
+                f"in [{request.start.isoformat()}, {request.end.isoformat()}): {_exception_details(exc)}"
+            ) from exc
         except Exception as exc:
             raise ProviderError(
                 f"Yahoo download failed for {request.symbol!r} "
-                f"at interval {request.timeframe!r}."
+                f"at interval {request.timeframe!r} "
+                f"in [{request.start.isoformat()}, {request.end.isoformat()}) "
+                f"with request timeout {self.timeout:g}s. Cause: {_exception_details(exc)}"
             ) from exc
 
         if downloaded is None or (
@@ -130,6 +142,21 @@ class YFinanceProvider(BaseDataProvider):
             raise ProviderError("Yahoo download did not return a pandas DataFrame.")
 
         canonical = _normalize(downloaded, request.symbol, date_labels=date_labels)
+        if self.skip_invalid_bars or self.skip_missing_ohlc:
+            # Exclusion only relaxes value rules. It must never hide duplicate
+            # keys, malformed timestamps or lossy numeric conversions.
+            canonical = validate_ohlcv_structure(canonical.sort(["symbol", "timestamp"]))
+        if self.skip_invalid_bars:
+            flags = bar_value_flags(canonical)
+            invalid = flags.select(pl.any_horizontal(pl.all())).to_series()
+            bad = canonical.filter(invalid)
+            for row, failures in zip(bad.iter_rows(named=True), flags.filter(invalid).iter_rows(named=True), strict=True):
+                omissions.append(OmittedBar(row["timestamp"], _omission_reason(row, failures)))
+            if bad.height:
+                warnings.warn(f"Yahoo {request.symbol}: excluded {bad.height} invalid bars; "
+                              "timestamps, original values, and reasons are recorded. Returned data has gaps.",
+                              UserWarning, stacklevel=2)
+            canonical = canonical.filter(~invalid)
         if self.skip_missing_ohlc:
             missing_ohlc = pl.all_horizontal(
                 [pl.col(column).is_null() | pl.col(column).is_nan()
@@ -168,6 +195,7 @@ class YFinanceProvider(BaseDataProvider):
             omitted_bars=tuple(item for item in omissions
                                if request.start <= item.timestamp < request.end),
             provider_version=f"yfinance/{yf.__version__}",
+            skip_invalid_bars=self.skip_invalid_bars,
         ))
 
     def _validate_request(self, request: DataRequest) -> None:
@@ -196,8 +224,31 @@ class YFinanceProvider(BaseDataProvider):
             raise UnsupportedRequestError("Yahoo requests must contain a single ticker.")
 
 
+def _exception_details(error):
+    """Expose useful upstream diagnostics in reports that only retain str(exc)."""
+    details, seen = [], set()
+    while error is not None and id(error) not in seen and len(details) < 3:
+        seen.add(id(error))
+        detail = f"{type(error).__name__}: {str(error).strip() or '(no message)'}"
+        response = getattr(error, "response", None)
+        status = getattr(response, "status_code", None)
+        if isinstance(status, int) and not isinstance(status, bool):
+            detail += f" (HTTP {status})"
+        details.append(detail)
+        error = error.__cause__ or (None if error.__suppress_context__ else error.__context__)
+    if error is not None and id(error) not in seen:
+        details.append("additional causes omitted")
+    return " <- ".join(details)
+
+
+def _omission_reason(values, failures):
+    fields = ", ".join(f"{name}={values[name]!r}" for name in ("open", "high", "low", "close", "volume"))
+    reasons = ", ".join(name for name, failed in failures.items() if failed)
+    return f"invalid_bar: {reasons}; original values: {fields}"
+
+
 def _download_history(*, symbol, start, end, interval, timeout, skip_missing_ohlc,
-                      omissions=None, date_labels=False):
+                      omissions=None, date_labels=False, skip_invalid_bars=False):
     # yfinance 1.7.0 fills null volume with zero even with repair=False and
     # keepna=True. Check the same HTTP response before history() can do so.
     # PriceHistory is private to this Ticker; never patch yfinance globals or
@@ -205,7 +256,8 @@ def _download_history(*, symbol, start, end, interval, timeout, skip_missing_ohl
     # raw-response tests and must be rechecked when upgrading pinned yfinance.
     history = yf.Ticker(symbol)._lazy_load_price_history()
     history._data = _VolumeCheckedData(history._data, symbol, skip_missing_ohlc,
-                                      omissions=omissions, date_labels=date_labels)
+                                      omissions=omissions, date_labels=date_labels,
+                                      skip_invalid_bars=skip_invalid_bars)
     # Retain per-call exception handling instead of changing yfinance's global
     # hide_exceptions setting. The pinned release still supports this argument.
     with warnings.catch_warnings():
@@ -223,12 +275,13 @@ class _VolumeCheckedData:
     """Per-fetch transport wrapper; inspect source JSON without changing it."""
 
     def __init__(self, transport, symbol: str, skip_missing_ohlc: bool, *,
-                 omissions=None, date_labels=False):
+                 omissions=None, date_labels=False, skip_invalid_bars=False):
         self._transport = transport
         self._symbol = symbol
         self._skip_missing_ohlc = skip_missing_ohlc
         self._omissions = [] if omissions is None else omissions
         self._date_labels = date_labels
+        self._skip_invalid_bars = skip_invalid_bars
 
     def __getattr__(self, name):
         return getattr(self._transport, name)
@@ -255,6 +308,39 @@ class _VolumeCheckedData:
                 raise ValueError("Volume count differs from timestamp count")
             missing = []
             omitted = []
+            omitted_reasons = {}
+            invalid_flags = None
+            if self._skip_invalid_bars:
+                fields = ("open", "high", "low", "close", "volume")
+                if any(len(quotes[field]) != len(timestamps) for field in fields):
+                    raise ValueError("OHLCV array lengths differ from timestamp count")
+                requested_indices = [index for index, timestamp in enumerate(timestamps)
+                                     if ("period1" not in params or timestamp >= params["period1"])
+                                     and ("period2" not in params or timestamp < params["period2"])]
+                if any(value is not None and (isinstance(value, bool) or not isinstance(value, Real))
+                       for field in fields for index in requested_indices
+                       for value in (quotes[field][index],)):
+                    raise ValueError("OHLCV source values must be numeric or null")
+                for index in requested_indices:
+                    for field in fields:
+                        value = quotes[field][index]
+                        if not _missing_number(value):
+                            try:
+                                _check_numeric_conversion(value, float(value), field)
+                            except (SchemaValidationError, TypeError, ValueError, OverflowError) as exc:
+                                stamp = pd.Timestamp(timestamps[index], unit="s", tz="UTC").isoformat()
+                                raise SchemaValidationError(
+                                    f"Yahoo {self._symbol} at {stamp}: {field}={value!r}; {exc}"
+                                ) from exc
+                raw = pl.DataFrame({field: [float(value) if value is not None else None
+                                          for index in requested_indices
+                                          for value in (quotes[field][index],)] for field in fields},
+                                   schema={field: pl.Float64 for field in fields})
+                flags = bar_value_flags(raw).with_columns(
+                    (raw["volume"].is_finite() & (raw["volume"] != raw["volume"].floor()))
+                    .fill_null(False).alias("volume must be integral"))
+                invalid_flags = {requested_indices[index]: flags.row(index, named=True) for index in
+                                 flags.select(pl.any_horizontal(pl.all())).to_series().arg_true()}
             seen = set()
             for index, (timestamp, volume) in enumerate(zip(timestamps, volumes, strict=True)):
                 # Yahoo can append a latest quote outside the download window;
@@ -264,8 +350,14 @@ class _VolumeCheckedData:
                 ):
                     continue
                 if timestamp in seen:
-                    raise DuplicateBarError(f"Yahoo {self._symbol}: duplicate source timestamp {timestamp}.")
+                    stamp = pd.Timestamp(timestamp, unit="s", tz="UTC").isoformat()
+                    raise DuplicateBarError(f"Yahoo {self._symbol}: duplicate source timestamp {stamp} (epoch {timestamp}).")
                 seen.add(timestamp)
+                if invalid_flags is not None and index in invalid_flags:
+                    omitted.append(index)
+                    omitted_reasons[index] = _omission_reason(
+                        {field: quotes[field][index] for field in fields}, invalid_flags[index])
+                    continue
                 # Remove wholly missing bars before yfinance can merge them
                 # into another bar. Missing volume alone never triggers a skip.
                 if self._skip_missing_ohlc and all(
@@ -277,18 +369,30 @@ class _VolumeCheckedData:
                 for column in ("open", "high", "low", "close", "volume"):
                     value = quotes[column][index]
                     if not _missing_number(value):
-                        _check_numeric_conversion(value, float(value), column)
+                        try:
+                            _check_numeric_conversion(value, float(value), column)
+                        except (SchemaValidationError, TypeError, ValueError, OverflowError) as exc:
+                            stamp = pd.Timestamp(timestamp, unit="s", tz="UTC").isoformat()
+                            raise SchemaValidationError(
+                                f"Yahoo {self._symbol} at {stamp}: {column}={value!r}; {exc}"
+                            ) from exc
                 if not _missing_number(volume):
                     if float(volume) != int(volume):
-                        raise SchemaValidationError("Yahoo source volume must be integral; yfinance would truncate it.")
+                        stamp = pd.Timestamp(timestamp, unit="s", tz="UTC").isoformat()
+                        raise SchemaValidationError(
+                            f"Yahoo {self._symbol} at {stamp}: volume={volume!r}; "
+                            "Yahoo source volume must be integral; yfinance would truncate it."
+                        )
                     continue
-                missing.append(pd.Timestamp(timestamp, unit="s", tz="UTC").isoformat())
+                missing.append(f"{pd.Timestamp(timestamp, unit='s', tz='UTC').isoformat()}: volume={volume!r}")
         except (KeyError, IndexError, TypeError, ValueError) as exc:
-            raise SchemaValidationError(f"Malformed Yahoo source volume data: {exc}") from exc
+            raise SchemaValidationError(f"Malformed Yahoo source volume data for {self._symbol}: {exc}") from exc
         if missing:
             raise InvalidOHLCVError(
                 f"Yahoo {self._symbol}: missing source volume at UTC timestamps: "
-                + ", ".join(missing)
+                + "; ".join(missing[:10])
+                + (f"; ... {len(missing) - 10} more invalid rows" if len(missing) > 10 else "")
+                + f". Found {len(missing)} invalid rows"
                 + ". Refusing yfinance's conversion of missing volume to zero."
             )
         if omitted:
@@ -299,14 +403,17 @@ class _VolumeCheckedData:
                     if not timezone:
                         raise SchemaValidationError("Yahoo session-date omissions require exchange timezone metadata.")
                     timestamp = timestamp.tz_convert(timezone).tz_localize(None).normalize().tz_localize("UTC")
-                self._omissions.append(OmittedBar(timestamp.to_pydatetime(), "all_ohlc_missing"))
+                self._omissions.append(OmittedBar(timestamp.to_pydatetime(),
+                                                 omitted_reasons.get(index, "all_ohlc_missing")))
             labels = ", ".join(
                 pd.Timestamp(timestamps[index], unit="s", tz="UTC").isoformat()
                 for index in omitted
             )
+            description = ("invalid bars (original values and reasons recorded)" if self._skip_invalid_bars
+                           else "bars with all OHLC prices missing")
             warnings.warn(
-                f"Yahoo {self._symbol}: skipped {len(omitted)} bars with all OHLC "
-                f"prices missing (UTC): {labels}. Returned data has gaps.",
+                f"Yahoo {self._symbol}: skipped {len(omitted)} {description} "
+                f"(UTC): {labels}. Returned data has gaps.",
                 UserWarning, stacklevel=3,
             )
             if len(omitted) == len(timestamps):

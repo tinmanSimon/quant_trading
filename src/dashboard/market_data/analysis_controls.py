@@ -94,11 +94,15 @@ def _saved_selection(memory, registry):
         return None
     from dashboard.state.migrations import (
         flat_settings_upgrade_message, upgrade_flat_settings, upgrade_trend_windows,
+        upgrade_flat_bar_statistics_settings,
     )
 
     if upgrade_trend_windows(selection, registry):
         st.info("Trend analysis now uses overlapping windows of twice the configured history value. "
                 "Your settings are preserved. Click Apply to calculate the updated analysis.")
+    if upgrade_flat_bar_statistics_settings(selection["draft"], registry):
+        st.info("Flat-period bar statistics includes a last-month summary and separates periods at recorded missing bars. "
+                "Click Apply to calculate it. Saved results are unchanged.")
     migration_message = flat_settings_upgrade_message(
         selection["draft"], action="Apply", saved_defaults=selection.get("defaults"))
     if upgrade_flat_settings(selection["draft"], registry, saved_defaults=selection.get("defaults")):

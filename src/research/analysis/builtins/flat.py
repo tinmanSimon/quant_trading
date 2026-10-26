@@ -3,13 +3,14 @@
 from copy import deepcopy
 
 from research.analysis.core.base import BaseChartLogic
-from research.analysis.flat import ALGORITHM_VERSION, FlatConfig, analyze
+from research.analysis.flat import ALGORITHM_VERSION, FlatConfig
+from research.analysis.core.omissions import analyze_flat_context
 from research.analysis.flat.presentation import summary_result
 
 
 class FlatLogic(BaseChartLogic):
     name = "flat"
-    version = f"1.0.0-engine.{ALGORITHM_VERSION}"
+    version = f"1.1.0-engine.{ALGORITHM_VERSION}"
     result_version = "3"
     label = "Flat analysis"
     description = (
@@ -93,8 +94,11 @@ class FlatLogic(BaseChartLogic):
         return FlatConfig.from_dict(config).to_dict()
 
     def calculate(self, context, config, progress=None):
-        analysis = analyze(context.completed_frame, config=FlatConfig.from_dict(config), progress=progress)
-        return summary_result(analysis)
+        analysis = analyze_flat_context(context, FlatConfig.from_dict(config), progress)
+        result = summary_result(analysis)
+        if context.metadata.get("omitted_bar_timestamps"):
+            result.messages.append("Recorded missing bars separate flat periods; periods cannot cross a known omission.")
+        return result
 
     def present(self, result, config):
         values = {"show_fit": True, "show_boundaries": True, **config}

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import math
-
 import polars as pl
 
 from ..exceptions import (
@@ -50,6 +48,27 @@ def validate_ohlcv(frame: pl.DataFrame) -> pl.DataFrame:
     ``(symbol, timestamp)`` only when the input already follows that order;
     unsorted input is rejected rather than silently rearranged.
     """
+    canonical = _canonicalize_ohlcv(frame)
+    _validate_bar_values(canonical)
+    _validate_no_duplicate_bars(canonical)
+    _validate_sort_order(canonical)
+    return canonical
+
+
+def validate_ohlcv_structure(frame: pl.DataFrame) -> pl.DataFrame:
+    """Validate keys, types and lossless conversion before checking bar values.
+
+    Providers that explicitly exclude invalid bars must still run these checks
+    on every row before removing any values. This function alone does not
+    certify OHLCV values; returned data must also pass :func:`validate_ohlcv`.
+    """
+    canonical = _canonicalize_ohlcv(frame)
+    _validate_no_duplicate_bars(canonical)
+    _validate_sort_order(canonical)
+    return canonical
+
+
+def _canonicalize_ohlcv(frame: pl.DataFrame) -> pl.DataFrame:
     if not isinstance(frame, pl.DataFrame):
         raise SchemaValidationError("OHLCV data must be supplied as a Polars DataFrame.")
 
@@ -91,10 +110,6 @@ def validate_ohlcv(frame: pl.DataFrame) -> pl.DataFrame:
     )
 
     _validate_key_values(canonical)
-    _validate_numeric_values(canonical)
-    _validate_ohlc_relationships(canonical)
-    _validate_no_duplicate_bars(canonical)
-    _validate_sort_order(canonical)
     return canonical
 
 
@@ -144,63 +159,66 @@ def _validate_key_values(frame: pl.DataFrame) -> None:
         raise InvalidOHLCVError("timestamp and symbol must both be present and non-empty.")
 
 
-def _validate_numeric_values(frame: pl.DataFrame) -> None:
-    invalid_numeric_value = pl.any_horizontal(
-        *[
-            pl.col(column).is_null() | ~pl.col(column).is_finite()
-            for column in _NUMERIC_COLUMNS
-        ]
+def bar_value_flags(frame: pl.DataFrame) -> pl.DataFrame:
+    # Evaluate all value rules together so a missing close does not hide other
+    # bad bars. Comparisons only apply to finite operands; missing/inf/NaN have
+    # their own reasons. Keep the valid-data path vectorized.
+    rules = {}
+    for column in _NUMERIC_COLUMNS:
+        value = pl.col(column)
+        rules[f"{column} is missing (null)"] = value.is_null()
+        rules[f"{column} is not finite"] = value.is_not_null() & ~value.is_finite()
+        if column != "volume":
+            rules[f"{column} must be greater than zero"] = value.is_finite() & (value <= 0)
+    rules["volume must be greater than or equal to zero"] = (
+        pl.col("volume").is_finite() & (pl.col("volume") < 0)
     )
-    if frame.select(invalid_numeric_value.any()).item():
-        invalid_rows = frame.filter(invalid_numeric_value)
-        details = []
-        for row in invalid_rows.head(10).iter_rows(named=True):
-            values = ", ".join(
-                f"{column}={row[column]!r}"
-                for column in _NUMERIC_COLUMNS
-                if row[column] is None or not math.isfinite(row[column])
-            )
-            details.append(
-                f"{row['symbol']} at {row['timestamp'].isoformat()}: {values}"
-            )
-        remaining = invalid_rows.height - len(details)
-        if remaining:
-            details.append(f"... {remaining} more invalid rows")
-        raise InvalidOHLCVError(
-            "OHLCV numeric values must be finite and non-null. "
-            f"Found {invalid_rows.height} invalid rows (timestamps in UTC): "
-            + "; ".join(details)
+    for left, right in (("low", "high"), ("low", "open"), ("open", "high"),
+                        ("low", "close"), ("close", "high")):
+        rules[f"{left} exceeds {right}"] = (
+            pl.col(left).is_finite() & pl.col(right).is_finite() & (pl.col(left) > pl.col(right))
         )
-
-    if frame.select((pl.col("volume") < 0).any()).item():
-        raise InvalidOHLCVError("volume must be greater than or equal to zero.")
+    return frame.select(expr.fill_null(False).alias(reason) for reason, expr in rules.items())
 
 
-def _validate_ohlc_relationships(frame: pl.DataFrame) -> None:
-    invalid_bar = (
-        (pl.col("open") <= 0)
-        | (pl.col("high") <= 0)
-        | (pl.col("low") <= 0)
-        | (pl.col("close") <= 0)
-        | (pl.col("low") > pl.col("high"))
-        | (pl.col("open") < pl.col("low"))
-        | (pl.col("open") > pl.col("high"))
-        | (pl.col("close") < pl.col("low"))
-        | (pl.col("close") > pl.col("high"))
+def _validate_bar_values(frame: pl.DataFrame) -> None:
+    flags = bar_value_flags(frame)
+    invalid = flags.select(pl.any_horizontal(pl.all())).to_series()
+    if not invalid.any():
+        return
+    bad_rows, bad_flags = frame.filter(invalid), flags.filter(invalid)
+    counts = ", ".join(f"{reason}: {count}" for reason, count in bad_flags.sum().row(0, named=True).items()
+                       if count)
+    details = []
+    for row, failures in zip(bad_rows.head(10).iter_rows(named=True),
+                             bad_flags.head(10).iter_rows(named=True), strict=True):
+        values = ", ".join(f"{column}={row[column]!r}" for column in _NUMERIC_COLUMNS)
+        reasons = ", ".join(reason for reason, failed in failures.items() if failed)
+        details.append(f"{row['symbol']} at {row['timestamp'].isoformat()}: {values}; reasons: {reasons}")
+    remaining = bad_rows.height - len(details)
+    if remaining:
+        details.append(f"... {remaining} more invalid rows (showing first 10)")
+    raise InvalidOHLCVError(
+        "OHLCV numeric values must be finite and non-null. Each bar must have positive prices "
+        "and satisfy low <= open/close <= high; volume must be greater than or equal to zero. "
+        f"Found {bad_rows.height} invalid rows (timestamps in UTC). "
+        f"Violation counts (a row can violate multiple rules): {counts}. Details: "
+        + "; ".join(details)
     )
-    if frame.select(invalid_bar.any()).item():
-        raise InvalidOHLCVError(
-            "Each bar must have positive prices and satisfy "
-            "low <= open/close <= high."
-        )
 
 
 def _validate_no_duplicate_bars(frame: pl.DataFrame) -> None:
-    has_duplicate = frame.select(
-        pl.struct(list(_KEY_COLUMNS)).is_duplicated().any().alias("has_duplicate")
-    ).item()
-    if has_duplicate:
-        raise DuplicateBarError("OHLCV data contains duplicate (symbol, timestamp) bars.")
+    duplicates = frame.filter(pl.struct(list(_KEY_COLUMNS)).is_duplicated())
+    if duplicates.height:
+        keys = duplicates.group_by(list(_KEY_COLUMNS), maintain_order=True).len()
+        details = [f"{row['symbol']} at {row['timestamp'].isoformat()}: {row['len']} occurrences"
+                   for row in keys.head(10).iter_rows(named=True)]
+        if keys.height > 10:
+            details.append(f"... {keys.height - 10} more duplicate keys")
+        raise DuplicateBarError(
+            f"OHLCV data contains duplicate (symbol, timestamp) bars: {keys.height} duplicate keys "
+            f"across {duplicates.height} rows (timestamps in UTC). " + "; ".join(details)
+        )
 
 
 def _validate_sort_order(frame: pl.DataFrame) -> None:

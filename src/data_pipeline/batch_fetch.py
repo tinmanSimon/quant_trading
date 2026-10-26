@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 import json
 from typing import TYPE_CHECKING, Callable
@@ -15,6 +15,7 @@ from .fetch_planning import plan_fetch, plan_missing_fetch
 from .models import DataQuery, DataRequest
 from .providers import MassiveProvider, ProviderRegistry, YFinanceProvider
 from .providers.massive import _validate_request_interval
+from .quality import merge_quality
 
 if TYPE_CHECKING:
     from .api import DataPipeline
@@ -71,15 +72,27 @@ class BatchFetchReport:
                    "fetch_ranges": pl.String, "fetched_row_count": pl.Int64, "warning_message": pl.String})
 
 
+def _quality_warning(quality, request):
+    recorded = {bar.timestamp for bar in quality.omitted_bars
+                if request.start <= bar.timestamp < request.end}
+    if recorded:
+        return (f"Dataset provenance records {len(recorded)} excluded bar timestamp(s) in the requested range. "
+                "See quality for original reasons. Fetch success or stored-range coverage does not certify "
+                "complete data; strict research must pass calendar and source-coverage validation.")
+    return None
+
+
 def fetch_many(pipeline: DataPipeline, *, tickers, start, end, timeframe="1d",
                provider="yahoo", skip_missing_ohlc: bool | None = None,
+               skip_invalid_bars: bool | None = None,
                massive_request_interval_seconds: float | None = None,
                overlap_policy: str = "error",
                progress: Callable[[dict], None] | None = None) -> BatchFetchReport:
     """Save each ticker independently, recording ordinary failures and quality.
 
     ``None`` preserves the pipeline's registered provider configuration. An
-    explicit Yahoo skip setting uses a separate provider for this batch only.
+    explicit Yahoo skip setting uses a separate provider for this batch only,
+    preserving the other policy and timeout from the registered provider.
     Massive uses one batch-local provider so pacing also spans ticker changes;
     an explicit interval overrides its configured value without changing the registry.
     ``error`` keeps strict overlap rejection. ``refresh_overlap`` skips covered
@@ -108,14 +121,21 @@ def fetch_many(pipeline: DataPipeline, *, tickers, start, end, timeframe="1d",
             massive_request_interval_seconds = _validate_request_interval(massive_request_interval_seconds)
         except ValueError as exc:
             raise InvalidDataRequestError(str(exc)) from None
-    if skip_missing_ohlc is not None:
+    if skip_missing_ohlc is not None or skip_invalid_bars is not None:
         if provider.strip().lower() != "yahoo":
-            raise InvalidDataRequestError("skip_missing_ohlc is a Yahoo-specific setting.")
+            raise InvalidDataRequestError("skip_missing_ohlc and skip_invalid_bars are Yahoo-specific settings.")
         # Import at call time: the public DataPipeline API delegates here.
         from .api import DataPipeline
 
+        current = pipeline.providers.get("yahoo")
+        options = {name: getattr(current, name, default) for name, default in
+                   (("timeout", 10.0), ("skip_missing_ohlc", False), ("skip_invalid_bars", False))}
+        if skip_missing_ohlc is not None:
+            options["skip_missing_ohlc"] = skip_missing_ohlc
+        if skip_invalid_bars is not None:
+            options["skip_invalid_bars"] = skip_invalid_bars
         pipeline = DataPipeline(pipeline.store.data_dir, providers=ProviderRegistry({
-            "yahoo": YFinanceProvider(skip_missing_ohlc=skip_missing_ohlc),
+            "yahoo": YFinanceProvider(**options),
         }))
     outcomes = []
     batch_pipeline = None
@@ -153,7 +173,10 @@ def fetch_many(pipeline: DataPipeline, *, tickers, start, end, timeframe="1d",
                     requests = (plan.fetch_request,) if plan.fetch_request is not None else ()
                 supersedes, covering = plan.supersedes, plan.existing_dataset_ids
             if not requests:
-                outcomes.append(FetchOutcome(symbol, "skipped", covering, **details))
+                quality = merge_quality([item.quality for item in existing if item.dataset_id in covering])
+                quality_data = json.loads(json.dumps(asdict(quality), default=lambda value: value.isoformat()))
+                outcomes.append(FetchOutcome(symbol, "skipped", covering, quality=quality_data,
+                                             warning_message=_quality_warning(quality, request), **details))
                 notify("skipped")
                 continue
             ranges = [{"start": item.start.isoformat(), "end": item.end.isoformat(),
@@ -223,6 +246,9 @@ def fetch_many(pipeline: DataPipeline, *, tickers, start, end, timeframe="1d",
                     result = batch_pipeline.store.write_raw(target, fetched.frame, quality=fetched.quality)
                 status = "refreshed" if supersedes else "saved"
             metadata = json.loads(result.to_json())
+            quality_warning = _quality_warning(result.quality, request)
+            if quality_warning:
+                details["warning_message"] = " ".join(filter(None, [details.get("warning_message"), quality_warning]))
             outcomes.append(FetchOutcome(
                 symbol, status, (result.dataset_id,), result.row_count,
                 quality=metadata.get("quality"), first_timestamp=result.first_timestamp,

@@ -459,6 +459,35 @@ def test_yahoo_rejects_duplicate_bars(download: Mock, request_data: DataRequest)
         YFinanceProvider().fetch(request_data)
 
 
+@pytest.mark.parametrize("policy", ["skip_invalid_bars", "skip_missing_ohlc"])
+def test_yahoo_exclusion_cannot_hide_duplicate_normalized_bar(
+    download: Mock, request_data: DataRequest, policy: str,
+) -> None:
+    frame = _vendor_frame()
+    duplicate = frame.iloc[[0]].copy()
+    duplicate[["Open", "High", "Low", "Close"]] = float("nan")
+    download.return_value = pd.concat([frame, duplicate])
+    with pytest.raises(DuplicateBarError, match="duplicate"):
+        YFinanceProvider(**{policy: True}).fetch(request_data)
+
+
+@pytest.mark.parametrize("violation", ["timestamp_precision", "numeric_precision"])
+def test_yahoo_exclusion_cannot_hide_malformed_invalid_row(
+    download: Mock, request_data: DataRequest, violation: str,
+) -> None:
+    frame = _vendor_frame()
+    frame.loc[frame.index[0], "Open"] = 0
+    if violation == "timestamp_precision":
+        frame.index = pd.DatetimeIndex([frame.index[0] + pd.Timedelta(microseconds=1), *frame.index[1:]])
+        expected = "timestamp precision"
+    else:
+        frame.loc[frame.index[0], "Volume"] = 2 ** 53 + 1
+        expected = "losslessly"
+    download.return_value = frame
+    with pytest.raises(SchemaValidationError, match=expected):
+        YFinanceProvider(skip_invalid_bars=True).fetch(request_data)
+
+
 def test_yahoo_normalizes_numeric_strings_and_nullable_integers(
     download: Mock, request_data: DataRequest
 ) -> None:
@@ -631,6 +660,11 @@ def test_yahoo_wraps_download_errors_without_retry(
         YFinanceProvider().fetch(request_data)
     assert error.value.__cause__ is failure
     download.assert_called_once()
+    message = str(error.value)
+    assert f"{type(failure).__name__}: {failure}" in message
+    assert request_data.start.isoformat() in message
+    assert request_data.end.isoformat() in message
+    assert "timeout 10s" in message
 
 
 def test_yahoo_legacy_fetch_matches_request_fetch(request_data: DataRequest) -> None:
@@ -639,3 +673,37 @@ def test_yahoo_legacy_fetch_matches_request_fetch(request_data: DataRequest) -> 
         "AAPL", "2024-01-02T14:30:00Z", "2024-01-02T16:30:00Z", "1h"
     )
     assert_frame_equal(legacy, provider.fetch(request_data))
+
+
+def test_yahoo_error_exposes_http_status_and_nested_cause(download, request_data):
+    root = RuntimeError("service unavailable")
+    root.response = Mock(status_code=503)
+    failure = RuntimeError("request failed")
+    failure.__cause__ = root
+    download.side_effect = failure
+    with pytest.raises(ProviderError) as error:
+        YFinanceProvider(timeout=30).fetch(request_data)
+    assert "RuntimeError: request failed <- RuntimeError: service unavailable (HTTP 503)" in str(error.value)
+    assert "timeout 30s" in str(error.value)
+
+
+def test_batch_report_retains_yahoo_and_validation_details(download, request_data, tmp_path):
+    from data_pipeline import DataPipeline
+    from yfinance.exceptions import YFRateLimitError
+
+    invalid = _vendor_frame()
+    invalid.iloc[1, invalid.columns.get_loc("Close")] = 999.
+    download.side_effect = [YFRateLimitError(), invalid, _vendor_frame()]
+    pipeline = DataPipeline(tmp_path / "data")
+    report = pipeline.fetch_many(["LIMITED", "INVALID", "VALID"],
+                                 start=request_data.start, end=request_data.end, timeframe="1h")
+    assert [item.status for item in report.outcomes] == ["failed", "failed", "saved"]
+    first, second, _ = report.to_frame().to_dicts()
+    assert first["error_type"] == "ProviderError"
+    assert "YFRateLimitError" in first["error_message"]
+    assert "Rate limited" in first["error_message"]
+    assert second["error_type"] == "InvalidOHLCVError"
+    assert "INVALID at 2024-01-02T15:30:00+00:00" in second["error_message"]
+    assert "close=999.0" in second["error_message"]
+    assert "close exceeds high" in second["error_message"]
+    assert len(pipeline.list_datasets()) == 1

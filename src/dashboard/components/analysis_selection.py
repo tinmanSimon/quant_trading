@@ -129,12 +129,17 @@ def select_analyses(registry, memory, *, prefix="batch-analysis"):
     """Edit independent instances without executing any analysis."""
     choices = {(item.name, item.version): item for item in registry.definitions()}
     draft = deepcopy(memory.values.get("analyses", []))
-    from dashboard.state.migrations import flat_settings_upgrade_message, upgrade_flat_settings
+    from dashboard.state.migrations import (
+        flat_settings_upgrade_message, upgrade_flat_settings, upgrade_flat_bar_statistics_settings,
+    )
 
     migration_message = flat_settings_upgrade_message(draft, action="Run analysis")
     if upgrade_flat_settings(draft, registry):
         st.info(migration_message)
         _clear_flat_lookback_widgets(draft, memory, prefix)
+    if upgrade_flat_bar_statistics_settings(draft, registry):
+        st.info("Flat-period bar statistics includes a last-month summary and separates periods at recorded missing bars. "
+                "Run analysis to calculate it. Saved results are unchanged.")
     for issue in registry.issues:
         st.warning(f"Analysis discovery: {issue}")
     if choices:
@@ -188,7 +193,7 @@ def _clear_flat_lookback_widgets(specs, memory, prefix):
     """Discard only the obsolete draft field after the candidate-width upgrade."""
     for spec in specs:
         if (isinstance(spec, dict) and spec.get("name") == "flat"
-                and spec.get("version") == "1.0.0-engine.2.2.0"
+                and spec.get("version") == "1.1.0-engine.2.2.0"
                 and isinstance(spec.get("instance_id"), str)):
             key = f"{prefix}-{spec['instance_id']}-auto_lookback"
             memory.values["widgets"].pop(key, None)

@@ -241,8 +241,15 @@ def _details(store, manifest, instance_id, spec, tickers, prefix):
     result = detail.get("results", {}).get(instance_id)
     if result is None:
         return
+    integrity = result.get("data", {}).get("data_integrity", {})
+    warnings = integrity.get("messages", [])
+    for message in warnings:
+        st.warning(message)
     for message in result.get("messages", []):
-        st.caption(message)
+        if message not in warnings:
+            st.caption(message)
+    if integrity.get("validation", {}).get("status") == "passed":
+        st.caption("Strict data validation passed for the saved input revisions and checked session range.")
     for text in result.get("data", {}).get("analysis", {}).get("text", []):
         st.markdown(text)
     for index, table in enumerate(result.get("tables", [])):
@@ -277,6 +284,13 @@ def render_run_results(store, manifest, memory, *, active=False):
                 text=f"{label}: {completed:,} of {counts['requested']:,} tickers finished")
     st.caption(" · ".join(f"{key.replace('_', ' ')}: {counts.get(key, 0):,}" for key in
                            ("completed", "partial", "failed", "no_data", "cancelled")))
+    warned = [ticker for ticker, entry in manifest["tickers"].items() if entry.get("data_warnings")]
+    if warned:
+        st.warning(f"{len(warned):,} ticker(s) have recorded data-quality warnings. "
+                   "Their screening results may use incomplete data; inspect the individual results.")
+    if not manifest["request"].get("strict_validation", False):
+        st.caption("Screening run: exchange-calendar completeness was not validated. "
+                   "An absence of recorded omissions does not establish complete data.")
     with st.expander("Run settings"):
         st.json(manifest["request"])
     specifications = {spec["instance_id"]: spec for spec in manifest["specs"]}
@@ -333,7 +347,7 @@ def render_run_results(store, manifest, memory, *, active=False):
     tickers = (rank_metrics(values, ranking, descending=descending) if ranking else sorted(values))
     tickers = [ticker for ticker in tickers if search.upper() in ticker.upper()
                and (selected_status is None or analysis_statuses[ticker] == selected_status)]
-    display_names, used = {}, {"ticker", "status", "analysis_status"}
+    display_names, used = {}, {"ticker", "status", "analysis_status", "data_validation", "data_warnings"}
     for spec in specs:
         name = spec.name if spec.name not in used else "metric: " + spec.name
         while name in used:
@@ -342,6 +356,8 @@ def render_run_results(store, manifest, memory, *, active=False):
         used.add(name)
     rows = [{"ticker": ticker, "status": manifest["tickers"][ticker]["status"],
              "analysis_status": analysis_statuses[ticker],
+             "data_validation": manifest["tickers"][ticker].get("data_validation", {}).get("status", "not_checked"),
+             "data_warnings": len(manifest["tickers"][ticker].get("data_warnings", [])),
              **{display_names[name]: value for name, value in values[ticker].items()}}
             for ticker in tickers]
     if rows:

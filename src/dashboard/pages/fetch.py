@@ -24,7 +24,7 @@ def _fetch_page(research: Research):
     timeframe = st.selectbox("Bar size", intervals, key="fetch-timeframe")
     with st.form("fetch-data"):
         tickers = st.text_area("Tickers (commas, spaces, or new lines)", "AAPL, MSFT")
-        start, end = _date_fields("fetch", intraday=timeframe in INTRADAY_DURATIONS)
+        start, end = _date_fields("fetch", intraday=timeframe in INTRADAY_DURATIONS, history_years=100)
         fetch_options = {}
         if provider == "massive":
             fetch_options["massive_request_interval_seconds"] = st.number_input(
@@ -46,9 +46,15 @@ def _fetch_page(research: Research):
                    "Historical revisions are retained; processed data derived from replaced inputs "
                    "becomes inactive and needs rebuilding.")
         skip = None
+        skip_invalid = None
         if provider == "yahoo":
             skip = st.checkbox("Skip bars where every OHLC price is missing", value=False)
             st.caption("Skipped timestamps and reasons are recorded. Other invalid values still fail validation.")
+            skip_invalid = st.checkbox("Exclude invalid bars", value=False, key="fetch-skip-invalid-bars")
+            st.caption("Yahoo only: exclude bars with missing/non-finite values, nonpositive prices, "
+                       "inconsistent OHLC, or invalid volume. Every exclusion records its timestamp, "
+                       "original values, and reason. This also excludes wholly missing bars. "
+                       "Malformed responses and duplicate timestamps still fail.")
         submitted = st.form_submit_button("Fetch and save", type="primary")
     if submitted:
         if not _tickers(tickers, provider) or start >= end:
@@ -78,6 +84,7 @@ def _fetch_page(research: Research):
         with st.spinner("Fetching and verifying each ticker…"):
             report = research.pipeline.fetch_many(_tickers(tickers, provider), provider=provider, timeframe=timeframe,
                                                   start=start, end=end, skip_missing_ohlc=skip,
+                                                  skip_invalid_bars=skip_invalid,
                                                   overlap_policy=overlap_policies[overlap_choice],
                                                   progress=show_progress, **fetch_options)
         st.session_state["fetch-report"] = report
@@ -85,6 +92,14 @@ def _fetch_page(research: Research):
     if report is not None:
         st.subheader("Most recent fetch report")
         st.dataframe(report.to_frame(), hide_index=True)
+        excluded = [{"ticker": outcome.ticker, "timestamp_utc": bar["timestamp"], "reason": bar["reason"]}
+                    for outcome in report.outcomes for bar in (outcome.quality or {}).get("omitted_bars", [])
+                    if bar["reason"].startswith("invalid_bar:")]
+        if excluded:
+            st.warning(f"{len(excluded)} invalid-bar exclusions are recorded in the saved results. "
+                       "Review their timestamps, original values, and reasons below.")
+            with st.expander("Excluded invalid bars"):
+                st.dataframe(excluded, hide_index=True)
         st.caption("row_count is the saved dataset size; fetched_row_count counts newly downloaded bars. "
                    "fetch_ranges shows each planned vendor request and its status. fetch_start/end spans "
                    "the plan and can include stored data that was not downloaded.")
@@ -103,5 +118,3 @@ def _fetch_page(research: Research):
         for outcome in report.outcomes:
             if getattr(outcome, "warning_message", None):
                 st.warning(f"{outcome.ticker}: {outcome.warning_message}")
-
-
