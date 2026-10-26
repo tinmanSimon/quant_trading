@@ -25,8 +25,9 @@ class OpenPriceBandsLogic(BaseChartLogic):
         "properties": {
             "reference": {
                 "type": "string", "enum": ["session", "first_bar", "each_bar"],
-                "default": "session", "title": "Open reference",
-                "description": "Session open, first selected bar's open, or each bar's own open.",
+                "default": "each_bar", "title": "Open reference",
+                "description": "Each bar's own open (default). Session uses one fixed open per "
+                "trading day; first_bar uses the first selected bar's open for the entire selection.",
             },
             "upper_percent": {
                 "type": "number", "minimum": 0, "default": 5.0, "title": "Upper offset (%)",

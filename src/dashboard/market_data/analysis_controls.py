@@ -90,11 +90,16 @@ def _saved_selection(memory, registry):
             or not isinstance(selection.get("applied"), list)):
         st.error("Saved chart logic selections are invalid. They were left unchanged.")
         return None
-    from dashboard.state.migrations import upgrade_trend_windows
+    from dashboard.state.migrations import upgrade_flat_settings, upgrade_trend_windows
 
     if upgrade_trend_windows(selection, registry):
         st.info("Trend analysis now uses overlapping windows of twice the configured history value. "
                 "Your settings are preserved. Click Apply to calculate the updated analysis.")
+    if upgrade_flat_settings(selection["draft"], registry):
+        st.info("Flat analysis has changed: it now requires every candle's high and low to fit "
+                "inside a price band. The previous slope settings have been replaced; the "
+                "new default maximum total band width is 2%. Review the band width and duration limits, "
+                "then click Apply to calculate the new definition.")
     _split_saved_display(selection, memory, registry)
     return selection
 
@@ -250,6 +255,9 @@ def render_logic_controls(context, memory, registry=None):
             st.caption(definition.description)
             try:
                 config = _configuration(definition, memory, f"chart-logic-{spec.instance_id}", spec.config)
+                if spec.name == "flat":
+                    # Preserve unknown restored fields so validation can report them.
+                    config = {**spec.config, **config}
             except (ValueError, TypeError, OverflowError, AttributeError) as error:
                 st.error(f"Invalid saved settings for {label}: {error}")
                 valid = False

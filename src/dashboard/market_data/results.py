@@ -46,7 +46,10 @@ def render_logic_results(run, registry=None, memory=None):
                     first = 0
                     if len(rows) > 500:
                         pages = (len(rows) + 499) // 500
-                        kwargs = dict(min_value=1, max_value=pages, value=pages, step=1,
+                        default_page = table.get("default_page", pages)
+                        if type(default_page) is not int or not 1 <= default_page <= pages:
+                            default_page = pages
+                        kwargs = dict(min_value=1, max_value=pages, value=default_page, step=1,
                                       key=f"chart-result-page-{spec.instance_id}-{table_index}")
                         label = f"{table['name']} page"
                         page = (memory.widget(st.number_input, label, **kwargs) if memory else

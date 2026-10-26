@@ -1,7 +1,34 @@
-"""Compatibility for saved trend selections and former trend-only results."""
+"""Compatibility for saved analysis selections and former trend-only results."""
 
 from research.analysis import AppliedRun, LogicSpec
 from research.analysis.core.runner import source_key
+
+
+def upgrade_flat_settings(specs, registry):
+    """Stage known slope settings as range settings; never rewrite results."""
+    version = "1.0.0-engine.2.0.0"
+    if not any(item.name == "flat" and item.version == version for item in registry.definitions()):
+        return False
+    defaults = registry.defaults("flat", version)
+    changed = False
+    for spec in specs:
+        if (not isinstance(spec, dict) or spec.get("name") != "flat"
+                or spec.get("version") not in {"1.0.0-engine.1.0.0", "1.0.0-engine.1.1.0"}
+                or not isinstance(spec.get("config"), dict)):
+            continue
+        config = spec["config"]
+        minimum = config.get("min_duration", defaults["min_duration"])
+        maximum = defaults["max_duration"]
+        if type(minimum) is int:
+            maximum = max(maximum, minimum + 1)
+        config.setdefault("max_duration", maximum)
+        config.pop("slope_min_pct", None)
+        config.pop("slope_max_pct", None)
+        config.setdefault("max_range_pct", defaults["max_range_pct"])
+        # Unknown fields must survive for normal configuration validation.
+        spec["version"] = version
+        changed = True
+    return changed
 
 
 def upgrade_trend_windows(selection, registry):

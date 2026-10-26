@@ -71,12 +71,30 @@ def test_percentage_levels_use_selected_open_reference(reference, expected):
     assert frame["open"].to_list() == [100., 200., 300.]
 
 
+@pytest.mark.parametrize("use_registry", [False, True])
+def test_default_30m_bands_follow_every_bar_open(use_registry):
+    opening = datetime(2024, 1, 2, 14, 30, tzinfo=UTC)
+    stamps = [opening + timedelta(minutes=30 * index) for index in range(3)]
+    stamps += [opening + timedelta(days=1, minutes=30 * index) for index in range(3)]
+    opens = [100., 120., 90., 200., 180., 210.]
+    frame = bars(stamps, opens)
+    logic = OpenPriceBandsLogic()
+    result = logic.calculate(context(frame, "30m"), configured(logic) if use_registry else {})
+    for kind, multiplier in (("upper", 1.05), ("lower", .95), ("open", 1.)):
+        overlay, = level(result, kind)
+        assert overlay["x"] == list(range(len(opens)))
+        assert overlay["y"] == pytest.approx([price * multiplier for price in opens])
+    assert [row["open_reference"] for row in result.tables[0]["rows"]] == opens
+    result.validate()
+
+
 def test_session_opens_reset_across_dst_without_bridging_sessions():
     # Friday is EST, Monday is EDT. Both are actual NYSE opening times.
     stamps = [datetime(2024, 3, 8, 14, 30, tzinfo=UTC), datetime(2024, 3, 8, 14, 31, tzinfo=UTC),
               datetime(2024, 3, 11, 13, 30, tzinfo=UTC), datetime(2024, 3, 11, 13, 31, tzinfo=UTC)]
     logic = OpenPriceBandsLogic()
-    result = logic.calculate(context(bars(stamps, [100., 101., 200., 201.])), configured(logic))
+    result = logic.calculate(context(bars(stamps, [100., 101., 200., 201.])),
+                             configured(logic, reference="session"))
     upper = level(result, "upper")
     assert [item["x"] for item in upper] == [[0, 1, 2, 2, 3]]
     assert [item["y"] for item in upper] == [[105., 105., None, 210., 210.]]
@@ -88,11 +106,11 @@ def test_mid_session_selection_never_substitutes_first_visible_open():
     opening = datetime(2024, 1, 2, 14, 30, tzinfo=UTC)
     frame = bars([opening + timedelta(minutes=30), opening + timedelta(minutes=31)], [120., 121.])
     logic = OpenPriceBandsLogic()
-    missing = logic.calculate(context(frame), configured(logic))
+    missing = logic.calculate(context(frame), configured(logic, reference="session"))
     assert not missing.overlays
     assert any("Session open unavailable" in message for message in missing.messages)
     support = bars([opening], [100.])
-    found = logic.calculate(context(frame, support=support), configured(logic))
+    found = logic.calculate(context(frame, support=support), configured(logic, reference="session"))
     assert level(found, "upper")[0]["x"] == [0, 1]
     assert level(found, "upper")[0]["y"] == [105., 105.]
     assert [row["source_index"] for row in found.tables[0]["rows"]] == [0, 1]
@@ -102,7 +120,7 @@ def test_regular_sessions_exclude_holidays_and_after_early_close():
     stamps = [datetime(2024, 7, 3, 13, 30, tzinfo=UTC), datetime(2024, 7, 3, 16, 59, tzinfo=UTC),
               datetime(2024, 7, 3, 17, 0, tzinfo=UTC), datetime(2024, 7, 4, 13, 30, tzinfo=UTC)]
     logic = OpenPriceBandsLogic()
-    result = logic.calculate(context(bars(stamps)), configured(logic))
+    result = logic.calculate(context(bars(stamps)), configured(logic, reference="session"))
     assert level(result, "upper")[0]["x"] == [0, 1]
     assert len(level(result, "upper")) == 1
     assert any("2 selected bars are outside" in message for message in result.messages)
@@ -113,7 +131,7 @@ def test_extended_hours_use_four_am_open_and_early_late_close():
               datetime(2024, 7, 3, 21, 0, tzinfo=UTC)]
     logic = OpenPriceBandsLogic()
     result = logic.calculate(context(bars(stamps, [100., 120., 130.])),
-                             configured(logic, session_hours="extended"))
+                             configured(logic, reference="session", session_hours="extended"))
     assert level(result, "upper")[0]["x"] == [0, 1]
     assert level(result, "upper")[0]["y"] == [105., 105.]
     assert any("1 selected bars are outside" in message for message in result.messages)
@@ -123,7 +141,7 @@ def test_daily_session_bars_are_date_labels_and_singletons_are_visible():
     frame = bars([datetime(2024, 7, 3, tzinfo=UTC), datetime(2024, 7, 4, tzinfo=UTC),
                   datetime(2024, 7, 5, tzinfo=UTC)], [100., 110., 200.])
     logic = OpenPriceBandsLogic()
-    raw = logic.calculate(context(frame, "1d"), configured(logic))
+    raw = logic.calculate(context(frame, "1d"), configured(logic, reference="session"))
     result = presented(logic, raw, show_open=False)
     assert [item["x"] for item in level(result, "upper")] == [[0, 2]]
     assert [item["y"] for item in level(result, "upper")] == [[105., 210.]]
@@ -135,7 +153,8 @@ def test_daily_session_bars_are_date_labels_and_singletons_are_visible():
 def test_daily_extended_reference_is_explicit_about_daily_open():
     frame = bars([datetime(2024, 7, 3, tzinfo=UTC)])
     logic = OpenPriceBandsLogic()
-    result = logic.calculate(context(frame, "1d"), configured(logic, session_hours="extended"))
+    result = logic.calculate(context(frame, "1d"),
+                             configured(logic, reference="session", session_hours="extended"))
     assert any("cannot distinguish regular and extended" in message for message in result.messages)
 
 
@@ -143,7 +162,7 @@ def test_multiday_session_reference_is_rejected_but_first_bar_is_supported():
     frame = bars([datetime(2024, 1, 2, tzinfo=UTC)])
     logic = OpenPriceBandsLogic()
     with pytest.raises(ValueError, match="intraday or 1d"):
-        logic.calculate(context(frame, "1wk"), configured(logic))
+        logic.calculate(context(frame, "1wk"), configured(logic, reference="session"))
     result = logic.calculate(context(frame, "1wk"), configured(logic, reference="first_bar"))
     assert level(result, "upper")[0]["y"] == [105.]
 
@@ -357,7 +376,7 @@ def test_many_session_bands_have_bounded_trace_count_and_flat_endpoints():
     assert len(constant.tables[0]["rows"]) == frame.height
     # Daily sessions use one marker series per level, not one trace per day.
     daily = bars([datetime(2024, 1, 1, tzinfo=UTC) + timedelta(days=day) for day in range(200)])
-    result = logic.calculate(context(daily, "1d"), configured(logic))
+    result = logic.calculate(context(daily, "1d"), configured(logic, reference="session"))
     assert len(result.overlays) == 3
     assert all(item["type"] == "markers" for item in result.overlays)
     assert len(result.overlays[0]["x"]) > 100

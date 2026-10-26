@@ -111,6 +111,13 @@ def select_analyses(registry, memory, *, prefix="batch-analysis"):
     """Edit independent instances without executing any analysis."""
     choices = {(item.name, item.version): item for item in registry.definitions()}
     draft = deepcopy(memory.values.get("analyses", []))
+    from dashboard.state.migrations import upgrade_flat_settings
+
+    if upgrade_flat_settings(draft, registry):
+        st.info("Flat analysis has changed: it now requires every candle's high and low to fit "
+                "inside a price band. The previous slope settings have been replaced; the "
+                "new default maximum total band width is 2%. Review the band width and duration limits "
+                "before clicking Run analysis.")
     for issue in registry.issues:
         st.warning(f"Analysis discovery: {issue}")
     if choices:
@@ -148,6 +155,9 @@ def select_analyses(registry, memory, *, prefix="batch-analysis"):
             st.caption(definition.description)
             try:
                 config = _configuration(definition, memory, f"{prefix}-{spec.instance_id}", spec.config)
+                if spec.name == "flat":
+                    # Preserve unknown restored fields so validation can report them.
+                    config = {**spec.config, **config}
                 updated.append(LogicSpec(spec.instance_id, spec.name, spec.version, config).to_dict())
             except (ValueError, TypeError, OverflowError, AttributeError) as error:
                 st.error(f"Invalid settings for {label}: {error}")

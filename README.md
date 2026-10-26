@@ -312,8 +312,11 @@ may contain only filtered overlays, so they require one Apply to rebuild the
 complete archive. Subsequent display changes and restored complete results do
 not rerun analysis.
 
-**Open price bands** defaults to 5% above and below the session open. Its reference
-can instead be the first selected bar's open or each bar's own open. For intraday
+**Open price bands** defaults to 5% above and below each bar's own open, so intraday
+bands follow the opening price of each bar (including Databento 30-minute bars).
+Its reference can instead be the session open or the first selected bar's open.
+Saved configurations keep their reference: to change existing flat daily bands,
+set **Open reference** to `each_bar` and click **Apply**. For intraday
 session mode, regular hours follow the XNYS exchange calendar, including holidays,
 DST and early closes. Extended hours use the explicit US-equity convention of
 04:00–20:00 New York time (17:00 close on early-close days). The display timezone
@@ -323,6 +326,40 @@ opens are reported and skipped, never replaced with the first visible bar. Daily
 provider's daily open; extended-hours opens cannot be inferred from daily bars.
 Weekly/monthly bars support first-bar and each-bar references. Session outputs
 do not connect overnight.
+
+### Flat analysis
+
+Choose **Flat analysis** in **Market data** or **Analysis** to find periods whose
+candles all fit within a narrow horizontal price band, including every high and
+low. The default maximum total width is 2% of the band's midpoint, with durations
+from 20 to 200 observed bars, inclusive. For example, low 99 and high 101 give
+midpoint 100 and total width 2%. These are illustrative settings, not validated
+trading thresholds. Both durations are integers, with maximum strictly greater
+than minimum. The same registered `flat` logic runs on both pages using selected
+completed bars; historical analysis considers the entire selected date range.
+
+At each evaluated endpoint, the earliest qualifying start wins. The default
+summary works backward from the latest endpoint and retains strictly disjoint
+periods, moving to the bar before each retained period's start. It supplies
+**Flat periods** and **Flat summary** tables; Market data also draws horizontal
+lower, midpoint, and upper lines bounded by each period, with display-only
+visibility controls. Analysis uses its existing
+multi-ticker text/table and saved-run workflow.
+
+Each endpoint result is causal, but later bars can change which periods the final summary
+selects. Use a historical prefix or `replay` for decisions as of an earlier bar.
+Large opposing moves cannot cancel through averaging; drift qualifies only while
+all prices remain within the band. Candle heights need not be equal. Monotonic
+queues find endpoint periods in linear time, with compact results. A long flat
+history can produce adjacent periods capped by the maximum duration.
+
+Restored older flat selections migrate to the new band definition in their draft
+settings, retaining duration limits and replacing slope bounds with a default
+2% total width. Review the changed definition and width, then click **Apply** or
+**Run analysis**. Applied snapshots and saved batch results retain their original
+settings and outputs.
+See [Flat analysis](docs/flat_analysis.md) for formulas, selection semantics,
+Python APIs, and scaling limits.
 
 ### Private research analyses
 

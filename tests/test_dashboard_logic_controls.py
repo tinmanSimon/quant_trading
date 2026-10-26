@@ -228,7 +228,9 @@ def test_legacy_trend_settings_migrate_draft_and_applied_separately(tmp_path, mo
     assert display["slope_max"] == .2
 
 
-def test_market_page_combines_builtin_logics_and_keeps_chart_stable(tmp_path, monkeypatch):
+@pytest.mark.parametrize("provider,timeframe", [("yahoo", "1d"), ("databento", "30m")])
+def test_market_page_combines_builtin_logics_and_keeps_chart_stable(tmp_path, monkeypatch,
+                                                                  provider, timeframe):
     from datetime import UTC, datetime, timedelta
     import math
 
@@ -240,14 +242,17 @@ def test_market_page_combines_builtin_logics_and_keeps_chart_stable(tmp_path, mo
 
     monkeypatch.setattr(trend_settings, "DEFAULT_SETTINGS_PATH", tmp_path / "trend.json")
     research = Research(tmp_path / "data", tmp_path / "runs")
-    stamps = [datetime(2024, 1, 1, tzinfo=UTC) + timedelta(days=index) for index in range(24)]
+    step = timedelta(days=1) if timeframe == "1d" else timedelta(minutes=30)
+    start = (datetime(2024, 1, 2, tzinfo=UTC) if timeframe == "1d"
+             else datetime(2024, 1, 2, 14, 30, tzinfo=UTC))
+    stamps = [start + step * index for index in range(24)]
     prices = [100 * math.exp(index * .002) for index in range(24)]
     frame = pl.DataFrame({"timestamp": stamps, "symbol": ["TEST"] * 24,
                           "open": prices, "high": [p * 1.01 for p in prices],
                           "low": [p * .99 for p in prices], "close": prices,
                           "volume": [100.] * 24})
     research.pipeline.ingest_frame(DataRequest("TEST", stamps[0], stamps[-1] + timedelta(days=1),
-                                              timeframe="1d"), frame)
+                                              timeframe=timeframe, provider=provider), frame)
     monkeypatch.setattr(dashboard, "Research", lambda **kwargs: research)
     renders = []
     render_chart = dashboard.render_series_chart
@@ -262,7 +267,7 @@ def test_market_page_combines_builtin_logics_and_keeps_chart_stable(tmp_path, mo
     app.selectbox(key="chart-logic-add-choice").set_value(("open_price_bands", "1.0.0")).run()
     app.button(key="chart-logic-add").click().run()
     reference = next(item for item in app.selectbox if item.label == "Open reference")
-    reference.set_value("first_bar").run()
+    assert reference.value == "each_bar"
     app.selectbox(key="chart-logic-add-choice").set_value(("trend", TrendLogic.version)).run()
     app.button(key="chart-logic-add").click().run()
     assert renders[-1]["overlays"] == []
@@ -271,6 +276,10 @@ def test_market_page_combines_builtin_logics_and_keeps_chart_stable(tmp_path, mo
     overlays = renders[-1]["overlays"]
     assert {item["type"] for item in overlays} == {"line", "log_line"}
     assert len({item["instance_id"] for item in overlays}) == 2
+    for kind, multiplier in (("upper", 1.05), ("lower", .95), ("open", 1.)):
+        band, = [item for item in overlays if item["id"].endswith(":" + kind)]
+        assert band["x"] == list(range(len(prices)))
+        assert band["y"] == pytest.approx([price * multiplier for price in prices])
     assert any("trend_id" in table.value.columns for table in app.dataframe)
     previous = renders[-1]
     next(item for item in app.number_input if item.label == "Upper offset (%)").set_value(10).run()
@@ -281,7 +290,7 @@ def test_market_page_combines_builtin_logics_and_keeps_chart_stable(tmp_path, mo
     assert renders[-1]["overlay_revision"] > previous["overlay_revision"]
     assert [item for item in renders[-1]["overlays"] if item["type"] == "log_line"] == [
         item for item in overlays if item["type"] == "log_line"]
-    app.date_input[0].set_value(stamps[4].date()).run()
+    app.date_input[0].set_value(stamps[0].date() + timedelta(days=1)).run()
     assert not app.exception and not app.error
     assert renders[-1]["overlays"] == []
 
