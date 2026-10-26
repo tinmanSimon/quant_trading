@@ -48,12 +48,23 @@ def test_market_data_and_analysis_discover_same_flat_settings():
     assert definitions[0] == definitions[1]
     assert definitions[0].label == "Flat analysis"
     properties = definitions[0].schema["properties"]
-    assert set(properties) == {"min_duration", "max_duration", "max_range_pct"}
+    assert set(properties) == {
+        "min_duration", "max_duration", "max_range_pct", "band_width_mode", "auto_percentile",
+        "auto_multiplier", "long_bar_filter", "long_bar_multiplier",
+    }
     assert properties["min_duration"]["default"] == 20
     assert properties["max_duration"]["default"] == 200
     assert properties["max_range_pct"]["default"] == 2.0
     assert properties["max_range_pct"]["exclusiveMinimum"] == 0
     assert properties["max_range_pct"]["exclusiveMaximum"] == 200
+    assert properties["band_width_mode"]["default"] == "fixed"
+    assert properties["band_width_mode"]["enum"] == ["fixed", "automatic"]
+    assert properties["auto_percentile"]["default"] == 90.0
+    assert properties["auto_multiplier"]["default"] == 2.0
+    assert "auto_lookback" not in properties
+    assert properties["long_bar_filter"]["default"] is False
+    assert properties["long_bar_multiplier"]["default"] == 2.0
+    assert FlatLogic.result_version == "3"
     assert FlatLogic.input_policy == "completed"
 
 
@@ -80,6 +91,26 @@ def test_invalid_band_width_preserves_previous_calculation_and_display(width):
     with pytest.raises(ValueError):
         runner.apply([LogicSpec(spec.instance_id, spec.name, spec.version,
                                 {**SETTINGS, "max_range_pct": width})], context)
+    assert runner.present(applied).results[spec.instance_id].to_dict() == previous
+
+
+@pytest.mark.parametrize("changes", [
+    {"band_width_mode": "unknown"}, {"auto_percentile": -1}, {"auto_percentile": 101},
+    {"auto_percentile": float("nan")}, {"auto_multiplier": 0},
+    {"auto_multiplier": float("inf")}, {"auto_lookback": 100},
+    {"long_bar_filter": "yes"}, {"long_bar_multiplier": .5},
+    {"long_bar_multiplier": float("nan")},
+])
+def test_invalid_automatic_or_long_bar_settings_preserve_applied_results(changes):
+    runner = LogicRunner(load_registry())
+    context = LogicContext(flat_bars(), "30m", "TEST", START + timedelta(days=1))
+    spec = LogicSpec("flat-instance", FlatLogic.name, FlatLogic.version, SETTINGS)
+    applied = runner.apply([spec], context)
+    assert not applied.errors
+    previous = deepcopy(runner.present(applied).results[spec.instance_id].to_dict())
+    with pytest.raises(ValueError):
+        runner.apply([LogicSpec(spec.instance_id, spec.name, spec.version,
+                                {**SETTINGS, **changes})], context)
     assert runner.present(applied).results[spec.instance_id].to_dict() == previous
 
 
@@ -161,6 +192,21 @@ def test_unchanged_closes_do_not_accept_candles_with_a_wide_high_low_range():
     assert result.overlays == []
     assert summary_row(result)["period_count"] == 0
     assert summary_row(result)["current_flat"] is False
+
+
+def test_automatic_width_uses_candidate_candles_including_endpoint_without_extra_history():
+    frame = flat_bars().head(6).with_columns(
+        pl.when(pl.int_range(pl.len()) == 5).then(104.).otherwise(pl.col("high")).alias("high"),
+        pl.when(pl.int_range(pl.len()) == 5).then(96.).otherwise(pl.col("low")).alias("low"),
+    )
+    result = FlatLogic().calculate(LogicContext(frame, "30m", "TEST", START + timedelta(days=1)),
+                                  {**SETTINGS, "band_width_mode": "automatic"})
+    row, = period_rows(result)
+    assert (row["start_index"], row["end_index"]) == (0, 5)
+    # Candidate lengths [2, 2, 2, 2, 2, 8]: linear p90 is 5%; multiplier 2 gives 10%.
+    assert row["range_pct"] == pytest.approx(8.)
+    assert row["max_range_pct"] == pytest.approx(10.)
+    assert summary_row(result)["source_bars"] == 6
 
 
 def test_one_wide_candle_ends_the_current_band_even_when_close_is_unchanged():

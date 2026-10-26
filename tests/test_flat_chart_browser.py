@@ -43,7 +43,12 @@ async function test() {
                   "band is not horizontal at the reported price");
         }
         check(fit.hovertemplate.includes("Duration: " + row.bars + " bars") &&
-              fit.hovertemplate.includes("Band width:"), "flat hover lacks period details");
+              fit.hovertemplate.includes("Band width:") &&
+              fit.hovertemplate.includes("Maximum allowed width:"), "flat hover lacks period details");
+        if (fixtures.filtered) {
+            check(fit.hovertemplate.includes("Longest candle:") &&
+                  fit.hovertemplate.includes("Median candle:"), "flat hover lacks candle-size details");
+        }
     }
     const boundaries = chart.data.find(trace => trace.meta?.overlay_id === "flat-boundaries");
     check(boundaries && boundaries.x.length === 2 * fixtures.periods.length, "flat boundaries are missing");
@@ -69,7 +74,8 @@ document.querySelectorAll("script").forEach(script => script.remove());
 
 
 @pytest.mark.browser
-def test_flat_periods_draw_and_navigate_without_bridging(tmp_path):
+@pytest.mark.parametrize("adaptive", [False, True])
+def test_flat_periods_draw_and_navigate_without_bridging(tmp_path, adaptive):
     prices = [100.] * 6 + [120.] * 6 + [140.] * 6
     stamps = [datetime(2024, 1, 2, 14, 30, tzinfo=UTC) + timedelta(minutes=30 * i)
               for i in range(len(prices))]
@@ -78,7 +84,10 @@ def test_flat_periods_draw_and_navigate_without_bridging(tmp_path):
                           "volume": [100.] * len(prices)})
     context = LogicContext(frame, "30m", "flat-browser", stamps[-1] + timedelta(minutes=30))
     logic = FlatLogic()
-    result = logic.calculate(context, {"min_duration": 3, "max_range_pct": 2.0})
+    config = {"min_duration": 3, "max_range_pct": 2.0}
+    if adaptive:
+        config.update(band_width_mode="automatic", long_bar_filter=True)
+    result = logic.calculate(context, config)
     periods = result.tables[0]["rows"]
     assert [(row["start_index"], row["end_index"]) for row in periods] == [(12, 17), (6, 11), (0, 5)]
     source = ChartSeries(frame, timeframe="30m")
@@ -88,6 +97,7 @@ def test_flat_periods_draw_and_navigate_without_bridging(tmp_path):
                "event_id": target["id"], "label": target["label"],
                "source_index": target["source_index"], "end_index": target["end_index"]}
     fixtures = {
+        "filtered": adaptive,
         "periods": periods,
         "target_start": target["source_index"], "target_end": target["end_index"],
         "initial": window_payload(source, **options, overlays=result.overlays, overlay_revision=1),

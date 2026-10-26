@@ -8,7 +8,8 @@ from research.analysis.core.base import LogicResult
 
 _PERIOD_COLUMNS = [
     "period_id", "start_index", "end_index", "start", "end", "bars", "lower_price",
-    "upper_price", "center_price", "range_pct", "ends_at_current_bar", "_event_id",
+    "upper_price", "center_price", "range_pct", "max_range_pct", "max_bar_range_pct",
+    "median_bar_range_pct", "ends_at_current_bar", "_event_id",
 ]
 
 
@@ -31,6 +32,9 @@ def summary_result(analysis):
             "start": start_time, "end": end_time, "bars": period.duration,
             "lower_price": period.lower_price, "upper_price": period.upper_price,
             "center_price": period.center_price, "range_pct": period.range_pct,
+            "max_range_pct": period.max_range_pct,
+            "max_bar_range_pct": period.max_bar_range_pct,
+            "median_bar_range_pct": period.median_bar_range_pct,
             "ends_at_current_bar": current, "_event_id": event_id,
         })
         hover = [
@@ -38,9 +42,16 @@ def summary_result(analysis):
             f"Start: {escape(start_time)}", f"End: {escape(end_time)}",
             f"Duration: {period.duration:,} bars",
             f"Band width: {period.range_pct:.6g}%",
+            f"Maximum allowed width: {period.max_range_pct:.6g}%",
             f"Lowest low: {period.lower_price:.6g}", f"Highest high: {period.upper_price:.6g}",
             "Ends at current bar" if current else "Historical period",
         ]
+        if analysis.config.long_bar_filter:
+            hover.extend([
+                f"Longest candle: {period.max_bar_range_pct:.6g}%",
+                f"Median candle: {period.median_bar_range_pct:.6g}%",
+                f"Longest / median limit: {analysis.config.long_bar_multiplier:.6g}×",
+            ])
         for suffix, label, price in (("", "center", period.center_price),
                                      ("-lower", "low", period.lower_price),
                                      ("-upper", "high", period.upper_price)):
@@ -82,19 +93,34 @@ def summary_result(analysis):
     if analysis.status == "insufficient_data":
         message = f"Insufficient completed bars: need at least {analysis.config.min_duration:,}."
     elif not analysis.periods:
-        message = "No flat periods match the maximum band width and duration limits."
+        message = "No flat periods match the band width, duration, and enabled candle-size limits."
     else:
         message = (f"{len(analysis.periods):,} nonoverlapping flat periods, newest first; "
                    f"{covered:,} of {analysis.source_count:,} completed bars covered.")
         if current_period is None:
             message += " No flat period ends at the current bar."
+    settings = analysis.config
+    if settings.band_width_mode == "automatic":
+        width_message = (
+            f"Automatic band width: {settings.auto_multiplier:g}× the {settings.auto_percentile:g}th "
+            "percentile of candle lengths within each candidate period, including its endpoint. "
+            "Lengths include wicks and are percentages of each candle's midpoint. "
+            "The threshold is recalculated whenever the candidate changes."
+        )
+    else:
+        width_message = f"Fixed maximum total band width: {settings.max_range_pct:g}%."
+    if settings.long_bar_filter:
+        width_message += (
+            f" Each period's longest candle must be at most {settings.long_bar_multiplier:g}× "
+            "its median candle length. Length includes wicks and is a percentage of the candle midpoint."
+        )
     return LogicResult(
         overlays=overlays,
         tables=[
             {"name": "Flat periods", "columns": _PERIOD_COLUMNS, "rows": rows, "default_page": 1},
             {"name": "Flat summary", "columns": list(summary), "rows": [summary]},
         ],
-        messages=[message,
+        messages=[message, width_message,
                   "Every candle's high and low must fit inside the maximum band width. "
                   "Width is the full price range divided by its midpoint. Each period uses only "
                   "its endpoint's data. The latest-first summary may select "

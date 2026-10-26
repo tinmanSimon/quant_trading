@@ -33,12 +33,13 @@ def _set_calculation(app, prefix, maximum=200):
     app.number_input(key=prefix + "-max_range_pct").set_value(2.0)
 
 
+@pytest.mark.parametrize("automatic", [False, True])
 @pytest.mark.parametrize("maximum,intervals", [
     (200, [(12, 17), (6, 11), (0, 5)]),
     (4, [(14, 17), (8, 11), (2, 5)]),
 ])
 def test_market_data_flat_analysis_draws_final_periods_and_toggles_without_recalculation(
-        tmp_path, monkeypatch, maximum, intervals):
+        tmp_path, monkeypatch, maximum, intervals, automatic):
     from dashboard import app as dashboard, trend_settings
 
     monkeypatch.setattr(trend_settings, "DEFAULT_SETTINGS_PATH", tmp_path / "trend.json")
@@ -67,14 +68,23 @@ def test_market_data_flat_analysis_draws_final_periods_and_toggles_without_recal
     widget = next(item for item in app.number_input if item.key.endswith("-min_duration"))
     prefix = widget.key.removesuffix("-min_duration")
     _set_calculation(app, prefix, maximum)
+    if automatic:
+        app.selectbox(key=prefix + "-band_width_mode").select("automatic").run()
+        app.checkbox(key=prefix + "-long_bar_filter").check().run()
     assert calculations == []
     app.button(key="chart-logic-apply").click().run()
     assert not app.exception and not app.error
     assert len(calculations) == 1
+    assert calculations[0]["band_width_mode"] == ("automatic" if automatic else "fixed")
+    assert calculations[0]["long_bar_filter"] is automatic
     periods = _periods(app)
     assert list(zip(periods["start_index"], periods["end_index"])) == intervals
     assert periods["bars"].between(3, maximum).all()
     assert periods["range_pct"].between(0, 2.0).all()
+    if automatic:
+        assert periods["max_range_pct"].tolist() == pytest.approx(2 * periods["range_pct"])
+        assert periods["max_bar_range_pct"].tolist() == pytest.approx(periods["range_pct"])
+        assert periods["median_bar_range_pct"].tolist() == pytest.approx(periods["range_pct"])
     assert periods["lower_price"].tolist() == [139., 119., 99.]
     assert periods["upper_price"].tolist() == [141., 121., 101.]
     assert periods["center_price"].tolist() == [140., 120., 100.]
@@ -111,11 +121,12 @@ def test_market_data_flat_analysis_draws_final_periods_and_toggles_without_recal
         periods[["period_id", "start_index", "end_index"]])
 
 
+@pytest.mark.parametrize("automatic", [False, True])
 @pytest.mark.parametrize("maximum,intervals", [
     (200, [(12, 17), (6, 11), (0, 5)]),
     (4, [(14, 17), (8, 11), (2, 5)]),
 ])
-def test_analysis_page_runs_flat_periods_and_reopens_saved_tables(tmp_path, maximum, intervals):
+def test_analysis_page_runs_flat_periods_and_reopens_saved_tables(tmp_path, maximum, intervals, automatic):
     research = _research(tmp_path)
     script = f"""
 from dashboard.pages.analysis import _analysis_page
@@ -128,7 +139,14 @@ _analysis_page(Research({str(research.pipeline.store.data_dir)!r}, {str(research
     app.selectbox(key="batch-analysis-choice").select((FlatLogic.name, FlatLogic.version))
     app.button(key="batch-analysis-add").click().run()
     widget = next(item for item in app.number_input if item.key.endswith("-min_duration"))
-    _set_calculation(app, widget.key.removesuffix("-min_duration"), maximum)
+    prefix = widget.key.removesuffix("-min_duration")
+    _set_calculation(app, prefix, maximum)
+    if automatic:
+        app.selectbox(key=prefix + "-band_width_mode").select("automatic").run()
+        app.number_input(key=prefix + "-auto_percentile").set_value(75.)
+        app.number_input(key=prefix + "-auto_multiplier").set_value(1.5)
+        app.checkbox(key=prefix + "-long_bar_filter").check().run()
+        app.number_input(key=prefix + "-long_bar_multiplier").set_value(1.25)
     app.button(key="batch-run").click().run()
     jobs = [item for item in app.session_state.filtered_state.values() if isinstance(item, BatchJob)]
     assert len(jobs) == 1
@@ -140,6 +158,8 @@ _analysis_page(Research({str(research.pipeline.store.data_dir)!r}, {str(research
     assert list(zip(periods["start_index"], periods["end_index"])) == intervals
     assert periods["bars"].between(3, maximum).all()
     assert periods["range_pct"].tolist() == pytest.approx([100 * 2 / 140, 100 * 2 / 120, 2.0])
+    if automatic:
+        assert periods["max_range_pct"].tolist() == pytest.approx(1.5 * periods["range_pct"])
     assert {"lower_price", "upper_price", "center_price", "range_pct"} <= set(periods.columns)
     app.button(key="batch-save").click().run()
     assert not app.exception and not app.error
@@ -149,6 +169,14 @@ _analysis_page(Research({str(research.pipeline.store.data_dir)!r}, {str(research
     assert manifest["specs"][0]["name"] == "flat"
     assert manifest["specs"][0]["config"]["max_duration"] == maximum
     assert manifest["specs"][0]["config"]["max_range_pct"] == 2.0
+    config = manifest["specs"][0]["config"]
+    assert config["band_width_mode"] == ("automatic" if automatic else "fixed")
+    assert config["long_bar_filter"] is automatic
+    assert "auto_lookback" not in config
+    if automatic:
+        assert config["auto_percentile"] == 75.
+        assert config["auto_multiplier"] == 1.5
+        assert config["long_bar_multiplier"] == 1.25
     assert {"slope_min_pct", "slope_max_pct"}.isdisjoint(manifest["specs"][0]["config"])
     reopened = AppTest.from_string(script, default_timeout=30).run()
     assert not reopened.exception and not reopened.error
@@ -175,6 +203,67 @@ def _flat_pagination_app():
     run = LogicRunner(registry).apply([spec], LogicContext(frame, "30m", "pagination",
                                                         start + timedelta(days=30)))
     render_logic_results(run, registry=registry)
+
+
+def _flat_options_app():
+    import streamlit as st
+    from dashboard.components.analysis_selection import _configuration
+    from dashboard.workspace import market_memory
+    from research.analysis import discover_logics
+    from research.analysis.builtins.flat import FlatLogic
+
+    registry = discover_logics()
+    definition = registry.definition("flat", FlatLogic.version)
+    memory = market_memory("flat-options")
+    values = memory.values.setdefault("config", registry.defaults("flat", FlatLogic.version))
+    if st.session_state.get("invalid_auto"):
+        values["auto_percentile"] = 101.
+    try:
+        memory.values["config"] = _configuration(definition, memory, "flat-options", values)
+    except ValueError:
+        pass
+    st.session_state["config"] = memory.values["config"]
+
+
+def test_flat_mode_and_filter_controls_preserve_inactive_values():
+    app = AppTest.from_function(_flat_options_app).run()
+    assert not app.exception and not app.error
+    assert not app.number_input(key="flat-options-max_range_pct").disabled
+    assert app.number_input(key="flat-options-auto_percentile").disabled
+    assert app.number_input(key="flat-options-auto_multiplier").disabled
+    assert not any(item.key.endswith("-auto_lookback") for item in app.number_input)
+    assert app.number_input(key="flat-options-long_bar_multiplier").disabled
+    app.number_input(key="flat-options-max_range_pct").set_value(.7)
+    app.selectbox(key="flat-options-band_width_mode").select("automatic").run()
+    assert app.number_input(key="flat-options-max_range_pct").disabled
+    assert not app.number_input(key="flat-options-auto_percentile").disabled
+    app.number_input(key="flat-options-auto_percentile").set_value(80.)
+    app.number_input(key="flat-options-auto_multiplier").set_value(1.5)
+    app.checkbox(key="flat-options-long_bar_filter").check().run()
+    assert not app.number_input(key="flat-options-long_bar_multiplier").disabled
+    app.number_input(key="flat-options-long_bar_multiplier").set_value(3.)
+    app.selectbox(key="flat-options-band_width_mode").select("fixed")
+    app.checkbox(key="flat-options-long_bar_filter").uncheck().run()
+    assert not app.exception and not app.error
+    assert app.number_input(key="flat-options-max_range_pct").value == .7
+    assert app.number_input(key="flat-options-long_bar_multiplier").disabled
+    app.selectbox(key="flat-options-band_width_mode").select("automatic")
+    app.checkbox(key="flat-options-long_bar_filter").check().run()
+    assert not app.exception and not app.error
+    assert app.number_input(key="flat-options-auto_percentile").value == 80.
+    assert app.number_input(key="flat-options-auto_multiplier").value == 1.5
+    assert "auto_lookback" not in app.session_state["config"]
+    assert app.number_input(key="flat-options-long_bar_multiplier").value == 3.
+    assert app.session_state["config"]["max_range_pct"] == .7
+
+
+def test_disabled_automatic_controls_report_invalid_saved_values():
+    app = AppTest.from_function(_flat_options_app)
+    app.session_state["invalid_auto"] = True
+    app.run()
+    assert not app.exception
+    assert any("saved inactive value is invalid" in item.value for item in app.error)
+    assert app.session_state["config"]["auto_percentile"] == 101.
 
 
 def test_newest_first_flat_table_opens_first_page_and_preserves_order_on_next_page():

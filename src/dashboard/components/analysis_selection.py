@@ -1,8 +1,10 @@
 """Shared schema-driven configuration for built-in and private analyses."""
 
 from copy import deepcopy
+import math
 from uuid import uuid4
 
+from jsonschema import Draft202012Validator
 import streamlit as st
 
 from research.analysis import LogicSpec
@@ -74,6 +76,22 @@ def _settings_object(schema, values, memory, prefix):
                 continue
         value = values.get(name, field.get("default", _MISSING))
         try:
+            enabled_when = field.get("x-ui-enabled-when", {})
+            if not isinstance(enabled_when, dict):
+                raise ValueError(f"{label}: x-ui-enabled-when must be an object.")
+            # Controllers precede their dependent fields. Keep inactive controls
+            # mounted, so switching modes preserves their saved widget values.
+            disabled = any(result.get(controller, memory.values["widgets"].get(
+                prefix + "-" + controller, values.get(controller))) != expected
+                           for controller, expected in enabled_when.items())
+            if disabled:
+                saved_value = memory.values["widgets"].get(key, value)
+                invalid_number = (isinstance(saved_value, (int, float))
+                                  and not math.isfinite(saved_value))
+                if saved_value is not _MISSING and (
+                        invalid_number or not Draft202012Validator(field).is_valid(saved_value)):
+                    raise ValueError(f"{label}: the saved inactive value is invalid. "
+                                     "Enable this setting to correct it.")
             items = field.get("items", {})
             options = field.get("x-ui-options", items.get("enum") if isinstance(items, dict) else None)
             if field.get("type") == "array" and isinstance(options, list):
@@ -88,7 +106,7 @@ def _settings_object(schema, values, memory, prefix):
                     st.caption(f"{label}: no choices are available in these results.")
                 result[name] = memory.widget(
                     st.multiselect, label, options=options, default=valid, key=key,
-                    help=field.get("description"), disabled=not options,
+                    help=field.get("description"), disabled=disabled or not options,
                 )
             elif (field.get("type") == "object" and field.get("properties")
                   and field.get("additionalProperties") is False):
@@ -98,7 +116,7 @@ def _settings_object(schema, values, memory, prefix):
                 result[name] = _settings_object(
                     field, value if isinstance(value, dict) else {}, memory, key)
             else:
-                result[name] = _field(label, field, value, memory, key, None)
+                result[name] = _field(label, field, value, memory, key, None, disabled=disabled)
         except (ValueError, TypeError) as error:
             st.error(str(error))
             errors.append(str(error))
@@ -111,13 +129,12 @@ def select_analyses(registry, memory, *, prefix="batch-analysis"):
     """Edit independent instances without executing any analysis."""
     choices = {(item.name, item.version): item for item in registry.definitions()}
     draft = deepcopy(memory.values.get("analyses", []))
-    from dashboard.state.migrations import upgrade_flat_settings
+    from dashboard.state.migrations import flat_settings_upgrade_message, upgrade_flat_settings
 
+    migration_message = flat_settings_upgrade_message(draft, action="Run analysis")
     if upgrade_flat_settings(draft, registry):
-        st.info("Flat analysis has changed: it now requires every candle's high and low to fit "
-                "inside a price band. The previous slope settings have been replaced; the "
-                "new default maximum total band width is 2%. Review the band width and duration limits "
-                "before clicking Run analysis.")
+        st.info(migration_message)
+        _clear_flat_lookback_widgets(draft, memory, prefix)
     for issue in registry.issues:
         st.warning(f"Analysis discovery: {issue}")
     if choices:
@@ -167,3 +184,12 @@ def select_analyses(registry, memory, *, prefix="batch-analysis"):
     return [LogicSpec.from_dict(item) for item in updated] if valid else None
 
 
+def _clear_flat_lookback_widgets(specs, memory, prefix):
+    """Discard only the obsolete draft field after the candidate-width upgrade."""
+    for spec in specs:
+        if (isinstance(spec, dict) and spec.get("name") == "flat"
+                and spec.get("version") == "1.0.0-engine.2.2.0"
+                and isinstance(spec.get("instance_id"), str)):
+            key = f"{prefix}-{spec['instance_id']}-auto_lookback"
+            memory.values["widgets"].pop(key, None)
+            st.session_state.pop(key, None)

@@ -42,10 +42,14 @@ def brute_current(frame, config):
 
 def test_settings_are_immutable_serializable_and_use_documented_defaults():
     config = FlatConfig()
-    assert config.to_dict() == {"min_duration": 20, "max_duration": 200, "max_range_pct": 2.0}
+    assert config.to_dict() == {
+        "min_duration": 20, "max_duration": 200, "max_range_pct": 2.0,
+        "band_width_mode": "fixed", "auto_percentile": 90.0, "auto_multiplier": 2.0,
+        "long_bar_filter": False, "long_bar_multiplier": 2.0,
+    }
     assert FlatConfig.from_dict(config.to_dict()) == config
     assert FlatConfig.from_dict({"min_duration": 3}).max_range_pct == 2
-    assert ALGORITHM_VERSION == "2.0.0"
+    assert ALGORITHM_VERSION == "2.2.0"
     with pytest.raises(FrozenInstanceError):
         config.min_duration = 10
 
@@ -282,6 +286,7 @@ def test_high_low_only_custom_names_and_date_inputs_have_stable_table_types():
     assert full.to_frame().columns == [
         "period_id", "start_index", "end_index", "start", "end", "bars",
         "lower_price", "upper_price", "center_price", "range_pct",
+        "max_range_pct", "max_bar_range_pct", "median_bar_range_pct",
     ]
     daily = pl.DataFrame({"day": [date(2020, 1, 1) + timedelta(days=i) for i in range(20)],
                           "upper": np.full(20, 101.), "lower": np.full(20, 99.)})

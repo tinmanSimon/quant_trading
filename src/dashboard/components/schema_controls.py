@@ -156,7 +156,7 @@ def _numeric_kwargs(schema, value):
     return kwargs
 
 
-def _field(label, schema, value, memory, key, bounds, context=None):
+def _field(label, schema, value, memory, key, bounds, context=None, *, disabled=False):
     """Render common JSON Schema types; complex unions/maps remain editable JSON."""
     if value is _MISSING:
         value = schema.get("default", _MISSING)
@@ -180,18 +180,20 @@ def _field(label, schema, value, memory, key, bounds, context=None):
         options = schema["enum"]
         index = options.index(value) if value in options else 0
         return memory.widget(st.selectbox, label, options=options, index=index, key=key,
-                             help=schema.get("description"))
+                             help=schema.get("description"), disabled=disabled)
     kind = schema.get("type")
     if kind == "boolean":
-        return memory.widget(st.checkbox, label, value=bool(value) if value is not _MISSING else False, key=key, help=schema.get("description"))
+        return memory.widget(st.checkbox, label, value=bool(value) if value is not _MISSING else False,
+                             key=key, help=schema.get("description"), disabled=disabled)
     if kind in ("integer", "number"):
         return memory.widget(st.number_input, label, key=key, help=schema.get("description"),
-                             **_numeric_kwargs(schema, value))
+                             disabled=disabled, **_numeric_kwargs(schema, value))
     if kind == "null":
         st.caption(f"{label}: null")
         return None
     if kind == "string":
         return memory.widget(st.text_input, label, value="" if value is _MISSING or value is None else str(value), key=key,
+                             disabled=disabled,
                              help=schema.get("description") or (
                                  f"ISO {schema['format']}" if schema.get("format") else None))
     if kind == "object" and schema.get("properties") and schema.get("additionalProperties") is False:

@@ -13,7 +13,9 @@ from uuid import uuid4
 import streamlit as st
 
 from research.analysis import LogicRunner, LogicSpec
-from dashboard.components.analysis_selection import _configuration, _settings_object, _needs_json_controls
+from dashboard.components.analysis_selection import (
+    _clear_flat_lookback_widgets, _configuration, _settings_object, _needs_json_controls,
+)
 from dashboard.charts.overlays import validate_overlay
 
 
@@ -90,16 +92,18 @@ def _saved_selection(memory, registry):
             or not isinstance(selection.get("applied"), list)):
         st.error("Saved chart logic selections are invalid. They were left unchanged.")
         return None
-    from dashboard.state.migrations import upgrade_flat_settings, upgrade_trend_windows
+    from dashboard.state.migrations import (
+        flat_settings_upgrade_message, upgrade_flat_settings, upgrade_trend_windows,
+    )
 
     if upgrade_trend_windows(selection, registry):
         st.info("Trend analysis now uses overlapping windows of twice the configured history value. "
                 "Your settings are preserved. Click Apply to calculate the updated analysis.")
-    if upgrade_flat_settings(selection["draft"], registry):
-        st.info("Flat analysis has changed: it now requires every candle's high and low to fit "
-                "inside a price band. The previous slope settings have been replaced; the "
-                "new default maximum total band width is 2%. Review the band width and duration limits, "
-                "then click Apply to calculate the new definition.")
+    migration_message = flat_settings_upgrade_message(
+        selection["draft"], action="Apply", saved_defaults=selection.get("defaults"))
+    if upgrade_flat_settings(selection["draft"], registry, saved_defaults=selection.get("defaults")):
+        st.info(migration_message)
+        _clear_flat_lookback_widgets(selection["draft"], memory, "chart-logic")
     _split_saved_display(selection, memory, registry)
     return selection
 

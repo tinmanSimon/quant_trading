@@ -1,6 +1,7 @@
 """Causal bounded-wick periods and a latest-first nonoverlapping summary."""
 
 from datetime import date, datetime
+import math
 from typing import Callable, Iterable, Iterator
 
 import polars as pl
@@ -27,10 +28,15 @@ def _period(times: list, end: int, windows: EnvelopeWindows) -> FlatPeriod | Non
     start = int(windows.starts[end])
     lower, upper = float(windows.lowers[end]), float(windows.uppers[end])
     center, width_pct = envelope(lower, upper)
+    max_bar = float(windows.max_bar_lengths[end])
+    median_bar = float(windows.median_bar_lengths[end])
     return FlatPeriod(
         period_id=f"F{start}-{end}", start_index=start, end_index=end,
         start_time=times[start], end_time=times[end], duration=end - start + 1,
         lower_price=lower, upper_price=upper, center_price=center, range_pct=width_pct,
+        max_range_pct=float(windows.limits[end]),
+        max_bar_range_pct=max_bar if math.isfinite(max_bar) else None,
+        median_bar_range_pct=median_bar if math.isfinite(median_bar) else None,
     )
 
 
@@ -93,8 +99,9 @@ def analyze_summary(frame: pl.DataFrame, *, timestamp_col: str = "timestamp", hi
                     progress: Progress | None = None) -> FlatAnalysisResult:
     """Scan candles once, then select latest-first strictly disjoint periods.
 
-    Numeric endpoint records take O(N) work and space. Period objects are only
-    built for selected rows. Every period uses candles through its own endpoint;
+    Period objects are only built for selected rows. The fixed, unfiltered scan
+    takes O(N) work; adaptive/filter scans also depend on the duration bounds.
+    Every period uses candles through its own endpoint;
     appending newer candles can change which historical periods the summary
     selects, without changing previously evaluated endpoint records.
     """

@@ -4,31 +4,70 @@ from research.analysis import AppliedRun, LogicSpec
 from research.analysis.core.runner import source_key
 
 
-def upgrade_flat_settings(specs, registry):
-    """Stage known slope settings as range settings; never rewrite results."""
-    version = "1.0.0-engine.2.0.0"
+def upgrade_flat_settings(specs, registry, *, saved_defaults=None):
+    """Stage known flat settings and defaults; never rewrite applied results."""
+    version = "1.0.0-engine.2.2.0"
     if not any(item.name == "flat" and item.version == version for item in registry.definitions()):
         return False
     defaults = registry.defaults("flat", version)
     changed = False
+    default_config = saved_defaults.get("flat") if isinstance(saved_defaults, dict) else None
+    if isinstance(default_config, dict) and "auto_lookback" in default_config:
+        default_config.pop("auto_lookback")
+        changed = True
     for spec in specs:
         if (not isinstance(spec, dict) or spec.get("name") != "flat"
-                or spec.get("version") not in {"1.0.0-engine.1.0.0", "1.0.0-engine.1.1.0"}
+                or spec.get("version") not in {
+                    "1.0.0-engine.1.0.0", "1.0.0-engine.1.1.0", "1.0.0-engine.2.0.0",
+                    "1.0.0-engine.2.1.0"}
                 or not isinstance(spec.get("config"), dict)):
             continue
         config = spec["config"]
-        minimum = config.get("min_duration", defaults["min_duration"])
-        maximum = defaults["max_duration"]
-        if type(minimum) is int:
-            maximum = max(maximum, minimum + 1)
-        config.setdefault("max_duration", maximum)
-        config.pop("slope_min_pct", None)
-        config.pop("slope_max_pct", None)
-        config.setdefault("max_range_pct", defaults["max_range_pct"])
+        if spec["version"] in {"1.0.0-engine.1.0.0", "1.0.0-engine.1.1.0"}:
+            minimum = config.get("min_duration", defaults["min_duration"])
+            maximum = defaults["max_duration"]
+            if type(minimum) is int:
+                maximum = max(maximum, minimum + 1)
+            config.setdefault("max_duration", maximum)
+            config.pop("slope_min_pct", None)
+            config.pop("slope_max_pct", None)
+            config.setdefault("max_range_pct", defaults["max_range_pct"])
+        if spec["version"] == "1.0.0-engine.2.1.0":
+            config.pop("auto_lookback", None)
+        for name in ("band_width_mode", "auto_percentile", "auto_multiplier",
+                     "long_bar_filter", "long_bar_multiplier"):
+            config.setdefault(name, defaults[name])
         # Unknown fields must survive for normal configuration validation.
         spec["version"] = version
         changed = True
     return changed
+
+
+def flat_settings_upgrade_message(specs, *, action, saved_defaults=None):
+    """Describe the versions being staged before upgrade_flat_settings mutates them."""
+    legacy_slope = any(isinstance(spec, dict) and spec.get("name") == "flat"
+                       and spec.get("version") in {"1.0.0-engine.1.0.0", "1.0.0-engine.1.1.0"}
+                       for spec in specs)
+    default_config = saved_defaults.get("flat") if isinstance(saved_defaults, dict) else None
+    previous_automatic = (any(isinstance(spec, dict) and spec.get("name") == "flat"
+                              and spec.get("version") == "1.0.0-engine.2.1.0" for spec in specs)
+                          or isinstance(default_config, dict) and "auto_lookback" in default_config)
+    if legacy_slope:
+        change = ("Flat analysis now requires every candle's high and low to fit inside a price band. "
+                  "The previous slope settings have been replaced with a fixed maximum total band width "
+                  "of 2% by default. Review the band width and duration limits. ")
+    elif not previous_automatic:
+        change = "Flat analysis now supports automatic band width and an optional long-bar filter. "
+    else:
+        change = ""
+    if previous_automatic:
+        change += ("Automatic width now uses the candles within each candidate flat period, including both endpoints; "
+                   "the separate lookback has been removed. Your mode, percentile, multipliers, and filter settings "
+                   "are preserved. ")
+    else:
+        change += "Automatic width and the long-bar filter are off by default. "
+    return (change +
+            f"Click {action} to calculate with the updated settings. Saved results are unchanged.")
 
 
 def upgrade_trend_windows(selection, registry):
